@@ -1,0 +1,136 @@
+# Transport: MQTT
+
+## Summary
+
+The MQTT transport carries x402 payment flows over MQTT, the messaging protocol most connected devices already speak. It lets agents pay for device data such as sensor readings, and lets devices sell that data without holding keys or running a web server.
+
+It reuses the x402 v2 objects unchanged: `PaymentRequired`, `PaymentPayload` and `SettleResponse`. The keys `x402/payment` and `x402/payment-response` match the MCP transport. The transport works on MQTT 3.1.1 and 5.0 brokers because all request and reply data travels in the message body.
+
+### Topics
+
+| Topic | Direction | Purpose |
+|---|---|---|
+| `x402/v1/catalog` | seller → all (retained) | Offers for sale, each with its `accepts` |
+| `x402/v1/req/<topic>` | buyer → seller | Request for `<topic>`, with or without payment |
+| `x402/v1/res/<clientId>/…` | seller → buyer | Replies, on a topic only that buyer can read |
+| `raw/<topic>` | device → seller | The device's own readings, private to the seller |
+
+Brokers MUST restrict `raw/#` so only the seller can read it, and MUST restrict `x402/v1/res/<clientId>/#` so only the client with that id can read it.
+
+## Payment Flow Overview
+
+1. The buyer publishes a request for a topic without payment.
+2. The seller replies with status `402` and a `PaymentRequired`.
+3. The buyer creates a `PaymentPayload` for one of the `accepts` entries.
+4. The buyer publishes the same request again, with the payment in `x402/payment`.
+5. The seller verifies the payment, makes sure it has a fresh reading, settles, and only then replies.
+6. The reply carries the reading in `result` and the settlement in `x402/payment-response`.
+
+## Payment Required Signaling
+
+**Mechanism**: a reply with `status: 402` published to the request's `replyTo`
+**Data Format**: `PaymentRequired`
+
+Request:
+
+```json
+{ "id": "7d0f5b4e", "replyTo": "x402/v1/res/x402-buyer-1a2b3c/7d0f5b4e" }
+```
+
+published to `x402/v1/req/mac/battery/temperature`.
+
+Reply:
+
+```json
+{
+  "id": "7d0f5b4e",
+  "status": 402,
+  "paymentRequired": {
+    "x402Version": 2,
+    "resource": {
+      "url": "mqtt://127.0.0.1:1884/mac/battery/temperature",
+      "description": "Battery temperature",
+      "mimeType": "application/json"
+    },
+    "accepts": [
+      {
+        "scheme": "exact",
+        "network": "eip155:8453",
+        "amount": "1000",
+        "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "payTo": "0x9A4A53e4F4345bCe286Cd47d9c3B3Ef3b7992f69",
+        "maxTimeoutSeconds": 120,
+        "extra": { "name": "USD Coin", "version": "2" }
+      }
+    ]
+  }
+}
+```
+
+`id` is 1–64 characters of `[A-Za-z0-9_-]`. `replyTo` MUST start with `x402/v1/res/`.
+
+## Payment Payload Transmission
+
+**Mechanism**: the `x402/payment` field of the request
+**Data Format**: `PaymentPayload`
+
+```json
+{
+  "id": "7d0f5b4e",
+  "replyTo": "x402/v1/res/x402-buyer-1a2b3c/7d0f5b4e",
+  "x402/payment": {
+    "x402Version": 2,
+    "accepted": { "scheme": "exact", "network": "eip155:8453", "amount": "1000", "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "payTo": "0x9A4A53e4F4345bCe286Cd47d9c3B3Ef3b7992f69", "maxTimeoutSeconds": 120, "extra": { "name": "USD Coin", "version": "2" } },
+    "payload": { "signature": "0x…", "authorization": { "from": "0x3B8b…F573", "to": "0x9A4A…2f69", "value": "1000", "validAfter": "…", "validBefore": "…", "nonce": "0x…" } }
+  }
+}
+```
+
+A buyer that gets no reply MUST resend the same request with the same `id` and the same payment. It MUST NOT sign a new payment for the same request.
+
+## Settlement Response Delivery
+
+**Mechanism**: the `x402/payment-response` field of a `status: 200` reply
+**Data Format**: `SettleResponse`
+
+```json
+{
+  "id": "7d0f5b4e",
+  "status": 200,
+  "result": { "value": 31.4, "unit": "°C", "ts": 1790544651036 },
+  "x402/payment-response": {
+    "success": true,
+    "transaction": "0xec7f730c4c9a4b6d53dba1cb9f308aa63853f78536eacb293c72cd52de8ce130",
+    "network": "eip155:8453",
+    "payer": "0x3B8b93fc86Ad4Af0600C7fe5fE38B15B7A3dF573"
+  }
+}
+```
+
+The seller MUST settle only after it holds a reading fresh enough to deliver, and MUST reply only after settlement succeeds. A buyer is never charged for a reading it does not get.
+
+Sellers MUST make payments idempotent per `(network, payer, nonce)`. A repeat of a settled request with the same `id` gets the same reply. The same payment under a different `id` is refused.
+
+## Error Handling
+
+Errors are replies with a non-200 `status` and an `error` string:
+
+| Status | Meaning | Charged |
+|---|---|---|
+| `400` | Payment invalid or does not match the quote | No |
+| `402` | Payment required (the quote) | No |
+| `404` | Nothing for sale on this topic | No |
+| `409` | Payment already used, or already in progress | No |
+| `429` | Too many requests | No |
+| `503` | Device offline, facilitator unavailable, or settlement failed | No |
+
+Requests larger than 16 KB, or without a valid `id` and `replyTo`, are dropped with no reply.
+
+If settlement times out, the seller MUST check the payment's on-chain state (for `exact` on EVM, `authorizationState(from, nonce)` on the token) before deciding. It delivers only if the transfer happened.
+
+## References
+
+- [x402 transport template](https://github.com/x402-foundation/x402/blob/main/specs/transport_template.md)
+- [x402 MCP transport](https://github.com/x402-foundation/x402/blob/main/specs/transports-v2/mcp.md)
+- [MQTT 3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/mqtt-v3.1.1.html) and [MQTT 5.0](https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html)
+- [EIP-3009](https://eips.ethereum.org/EIPS/eip-3009)

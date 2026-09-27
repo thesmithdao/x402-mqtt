@@ -1,0 +1,9 @@
+topic write x402/v1/req/#
+topic read x402/v1/catalog
+pattern read x402/v1/res/%c/#
+
+user x402-bridge
+topic readwrite #
+
+user my-device
+topic write raw/#

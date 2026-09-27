@@ -1,0 +1,12 @@
+{
+  "broker": "mqtt://127.0.0.1:1883",
+  "brokerUsername": "x402-bridge",
+  "brokerPassword": "set-your-own",
+  "payout": "0xYourPayoutAddress",
+  "facilitator": "coinbase",
+  "source": "mac",
+  "price": "0.001",
+  "offers": [
+    { "topic": "garden/soil/moisture", "price": "0.002", "unit": "%", "description": "Soil moisture" }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "name": "@cultos/x402-mqtt",
+  "version": "0.1.0",
+  "description": "x402 payments over MQTT. Sell device data to agents, settled in USDC on Base.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "x402-mqtt": "dist/cli.js" },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "SPEC.md", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "repository": { "type": "git", "url": "git+https://github.com/thesmithdao/x402-mqtt.git" },
+  "keywords": ["x402", "mqtt", "iot", "agents", "payments", "usdc", "base"],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "evidence": "node --env-file=.env dist/evidence.js"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "1.56.0",
+    "@x402/core": "2.26.0",
+    "@x402/evm": "2.26.0",
+    "aedes": "1.2.0",
+    "mqtt": "5.16.0",
+    "viem": "2.56.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.6.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#bdbdb7"/></marker>
+    <marker id="g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#e4a340"/></marker>
+  </defs>
+  <rect width="960" height="440" fill="#0b0b0b"/>
+  <text x="32" y="40" fill="#e6e6e3" font-size="18" font-weight="600">x402-mqtt</text>
+  <text x="140" y="40" fill="#8f8f89" font-size="13">Architecture</text>
+
+  <rect x="24" y="64" width="600" height="250" rx="8" fill="none" stroke="#4b4b47" stroke-dasharray="3 4"/>
+
+  <rect x="44" y="106" width="150" height="96" rx="6" fill="#181817" stroke="#4b4b47"/>
+  <text x="58" y="130" fill="#e6e6e3" font-size="13" font-weight="600">device</text>
+  <text x="58" y="152" fill="#8f8f89" font-size="11">your Mac, a sensor,</text>
+  <text x="58" y="168" fill="#8f8f89" font-size="11">anything on MQTT</text>
+  <text x="58" y="190" fill="#8f8f89" font-size="11">publishes raw/…</text>
+
+  <rect x="232" y="106" width="170" height="186" rx="6" fill="#181817" stroke="#4b4b47"/>
+  <text x="246" y="130" fill="#e6e6e3" font-size="13" font-weight="600">broker</text>
+  <text x="246" y="150" fill="#8f8f89" font-size="11">built-in, or Mosquitto</text>
+  <text x="246" y="182" fill="#e6e6e3" font-size="11">raw/#</text>
+  <text x="246" y="198" fill="#8f8f89" font-size="11">seller only</text>
+  <text x="246" y="230" fill="#e6e6e3" font-size="11">x402/v1/req/…</text>
+  <text x="246" y="246" fill="#e6e6e3" font-size="11">x402/v1/res/&lt;id&gt;/…</text>
+  <text x="246" y="262" fill="#8f8f89" font-size="11">each buyer, own replies</text>
+
+  <rect x="440" y="106" width="164" height="186" rx="6" fill="#181817" stroke="#e4a340"/>
+  <text x="454" y="130" fill="#e4a340" font-size="13" font-weight="600">x402-mqtt bridge</text>
+  <text x="454" y="154" fill="#8f8f89" font-size="11">price book</text>
+  <text x="454" y="176" fill="#e6e6e3" font-size="11">quote</text>
+  <text x="454" y="192" fill="#e6e6e3" font-size="11">verify</text>
+  <text x="454" y="208" fill="#e6e6e3" font-size="11">reading in hand</text>
+  <text x="454" y="224" fill="#e6e6e3" font-size="11">settle</text>
+  <text x="454" y="240" fill="#e6e6e3" font-size="11">deliver + receipt</text>
+  <text x="454" y="266" fill="#8f8f89" font-size="11">append-only ledger</text>
+
+  <rect x="700" y="106" width="236" height="96" rx="6" fill="#181817" stroke="#4b4b47"/>
+  <text x="714" y="130" fill="#e6e6e3" font-size="13" font-weight="600">buyer</text>
+  <text x="714" y="152" fill="#8f8f89" font-size="11">agent, script, bot</text>
+  <text x="714" y="168" fill="#8f8f89" font-size="11">small wallet, spend caps</text>
+  <text x="714" y="190" fill="#8f8f89" font-size="11">signs one exact payment</text>
+
+  <rect x="440" y="352" width="164" height="60" rx="6" fill="#181817" stroke="#4b4b47"/>
+  <text x="454" y="376" fill="#e6e6e3" font-size="13" font-weight="600">facilitator</text>
+  <text x="454" y="396" fill="#8f8f89" font-size="11">Coinbase or any x402</text>
+
+  <rect x="700" y="352" width="236" height="60" rx="6" fill="#181817" stroke="#4b4b47"/>
+  <text x="714" y="376" fill="#e6e6e3" font-size="13" font-weight="600">Base</text>
+  <text x="714" y="396" fill="#8f8f89" font-size="11">USDC → seller payout</text>
+
+  <path d="M194,154 H226" stroke="#bdbdb7" stroke-width="1.4" fill="none" marker-end="url(#a)"/>
+  <path d="M402,190 H434" stroke="#bdbdb7" stroke-width="1.4" fill="none" marker-end="url(#a)"/>
+  <path d="M434,246 H408" stroke="#e4a340" stroke-width="1.4" fill="none" marker-end="url(#g)"/>
+  <path d="M700,140 H660 V60 H384 V100" stroke="#bdbdb7" stroke-width="1.4" fill="none" marker-end="url(#a)"/>
+  <text x="664" y="54" fill="#8f8f89" font-size="11">ask / pay</text>
+  <path d="M317,298 V330 H818 V208" stroke="#e4a340" stroke-width="1.4" fill="none" marker-end="url(#g)"/>
+  <text x="628" y="324" fill="#e4a340" font-size="11">reading + receipt</text>
+  <path d="M522,292 V346" stroke="#bdbdb7" stroke-width="1.4" fill="none" marker-end="url(#a)"/>
+  <path d="M604,382 H694" stroke="#bdbdb7" stroke-width="1.4" fill="none" marker-end="url(#a)"/>
+  <text x="614" y="374" fill="#8f8f89" font-size="11">settles</text>
+</svg>
