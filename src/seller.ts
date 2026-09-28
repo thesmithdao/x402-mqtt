@@ -3,7 +3,7 @@ import { x402ResourceServer, type FacilitatorClient } from "@x402/core/server";
 import type { Network, PaymentPayload, PaymentRequired, PaymentRequirements, SettleResponse } from "@x402/core/types";
 import { authorizationTypes } from "@x402/evm";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
-import { createPublicClient, http, parseAbi, verifyTypedData, type Address, type Hex } from "viem";
+import { createPublicClient, http, parseAbi, parseEventLogs, verifyTypedData, type Address, type Hex } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import type { Ledger, LedgerEntry } from "./ledger.js";
 import { PAYMENT_KEY, PAYMENT_RESPONSE_KEY, parseAsk, type Catalog, type Offer, type Reading, type Reply } from "./spec.js";
@@ -35,6 +35,7 @@ const usdcAbi = parseAbi([
   "function authorizationState(address authorizer, bytes32 nonce) view returns (bool)",
   "function balanceOf(address account) view returns (uint256)",
   "event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)",
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
 ]);
 
 type Authorization = { from: Address; to: Address; value: string; validAfter: string; validBefore: string; nonce: Hex };
@@ -191,12 +192,12 @@ export class Seller extends EventEmitter {
         return reply(503, { error: "device offline, not charged" });
       }
 
-      this.options.ledger.append({ ...base, state: "verified", reading });
+      this.options.ledger.append({ ...base, state: "verified", reading, payTo: matched.payTo });
       let settlement: SettleResponse | undefined;
       try {
         settlement = await this.server.settlePayment(payment, matched);
       } catch {
-        settlement = await this.settledOnChain(authorization);
+        settlement = await this.settledOnChain(authorization, { payTo: matched.payTo, amount: matched.amount });
       }
       if (!settlement?.success) {
         this.record({ ...base, state: "failed", error: "settlement failed, not charged" });
@@ -268,7 +269,7 @@ export class Seller extends EventEmitter {
     return true;
   }
 
-  private async settledOnChain(authorization: Pick<Authorization, "from" | "nonce">): Promise<SettleResponse | undefined> {
+  private async settledOnChain(authorization: Pick<Authorization, "from" | "nonce">, expected: { payTo: string; amount: string }): Promise<SettleResponse | undefined> {
     const accepts = [...this.requirements.values()][0];
     const asset = accepts?.[0]?.asset as Address | undefined;
     if (!asset) return undefined;
@@ -283,8 +284,15 @@ export class Seller extends EventEmitter {
         fromBlock: latest > 2000n ? latest - 2000n : 0n,
         toBlock: latest,
       });
-      const transaction = logs.at(-1)?.transactionHash ?? "";
-      return { success: true, transaction, network: this.options.network, payer: authorization.from };
+      for (const log of [...logs].reverse()) {
+        if (!log.transactionHash) continue;
+        const receipt = await this.chain.getTransactionReceipt({ hash: log.transactionHash });
+        if (receipt.status !== "success") continue;
+        const transfers = parseEventLogs({ abi: usdcAbi, eventName: "Transfer", logs: receipt.logs.filter(item => item.address.toLowerCase() === asset.toLowerCase()) });
+        const paid = transfers.some(transfer => transfer.args.from.toLowerCase() === authorization.from.toLowerCase() && transfer.args.to.toLowerCase() === expected.payTo.toLowerCase() && transfer.args.value === BigInt(expected.amount));
+        if (paid) return { success: true, transaction: log.transactionHash, network: this.options.network, payer: authorization.from };
+      }
+      return undefined;
     } catch {
       return undefined;
     }
@@ -294,7 +302,7 @@ export class Seller extends EventEmitter {
     for (const entry of this.options.ledger.pending()) {
       if (!entry.key || !entry.payer) continue;
       const nonce = entry.key.split(":").at(-1) as Hex;
-      const settlement = await this.settledOnChain({ from: entry.payer as Address, nonce });
+      const settlement = await this.settledOnChain({ from: entry.payer as Address, nonce }, { payTo: entry.payTo ?? this.options.payTo, amount: entry.amount ?? "0" });
       if (settlement?.success) {
         this.record({ id: entry.id, topic: entry.topic, key: entry.key, payer: entry.payer, amount: entry.amount, network: entry.network, state: "recovered", tx: settlement.transaction, reading: entry.reading, settlement });
       }

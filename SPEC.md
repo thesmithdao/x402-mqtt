@@ -132,7 +132,7 @@ Requests larger than 16 KB, or without a valid `id` and `replyTo`, are dropped w
 
 `replyTo` is chosen by the sender, so it is not an identity. Sellers SHOULD check the payment against the quote, its signature and the payer's balance before calling the facilitator, and SHOULD rate-limit paid requests per paying wallet. Brokers that can read message bodies SHOULD only accept a request whose `replyTo` is under the sender's own client id.
 
-If settlement times out, the seller MUST check the payment's on-chain state (for `exact` on EVM, `authorizationState(from, nonce)` on the token) before deciding. It delivers only if the transfer happened.
+If settlement fails or times out, the seller MUST check the chain before deciding (for `exact` on EVM, `authorizationState(from, nonce)` on the token, then the transaction that used the nonce). It delivers only if that transaction moved the exact amount from the payer to its `payTo`. A used or cancelled nonce on its own is not payment.
 
 ## References
 

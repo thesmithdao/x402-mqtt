@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import mqtt, { type MqttClient } from "mqtt";
-import { CATALOG_TOPIC, RAW_PREFIX, REQUEST_PREFIX, parseReading, type Reading } from "./spec.js";
+import { CATALOG_TOPIC, RAW_PREFIX, REQUEST_PREFIX, parseReading, requireTls, type Reading } from "./spec.js";
 import type { Seller } from "./seller.js";
 
 export type Bridge = {
@@ -10,7 +10,8 @@ export type Bridge = {
   close: () => Promise<void>;
 };
 
-export async function connectBridge(options: { url: string; username?: string; password?: string }): Promise<{ client: MqttClient; latest: Map<string, Reading> }> {
+export async function connectBridge(options: { url: string; username?: string; password?: string; allowCleartext?: boolean }): Promise<{ client: MqttClient; latest: Map<string, Reading> }> {
+  if (options.username || options.password) requireTls(options.url, "broker credentials", options.allowCleartext);
   const client = await mqtt.connectAsync(options.url, {
     clientId: `x402-bridge-${randomBytes(4).toString("hex")}`,
     username: options.username,

@@ -48,7 +48,7 @@ async function sell(values: Record<string, string | boolean | undefined>) {
 
   const facilitator = await createFacilitator(config.facilitator);
   const ledger = new Ledger(config.ledger);
-  const { client, latest } = await connectBridge({ url, username, password });
+  const { client, latest } = await connectBridge({ url, username, password, allowCleartext: broker !== undefined || config.allowCleartext === true || values["allow-cleartext"] === true });
   const seller = new Seller({
     offers,
     payTo: config.payout,

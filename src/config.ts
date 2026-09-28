@@ -20,6 +20,7 @@ export type Config = {
   pagePort: number | false;
   testBuyers: string[];
   rpcUrl?: string;
+  allowCleartext?: boolean;
 };
 
 const defaults = {

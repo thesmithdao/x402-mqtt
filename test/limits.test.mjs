@@ -8,8 +8,9 @@ import { test } from "node:test";
 import { x402Client } from "@x402/core/client";
 import { ExactEvmScheme } from "@x402/evm/exact/client";
 import mqtt from "mqtt";
+import { encodeAbiParameters, encodeEventTopics, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { Ledger, Seller, SpendCapError, createBuyer, startBuiltInBroker } from "../dist/index.js";
+import { Ledger, Seller, SpendCapError, connectBridge, createBuyer, startBuiltInBroker } from "../dist/index.js";
 import { startPage } from "../dist/page.js";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -32,7 +33,7 @@ function fakeFacilitator(counter) {
   };
 }
 
-function fakeRpc({ used = false, balance = 0n, signature = false } = {}) {
+function fakeRpc(options = {}) {
   const word = value => `0x${value.toString(16).padStart(64, "0")}`;
   const server = createServer((request, response) => {
     let body = "";
@@ -41,17 +42,20 @@ function fakeRpc({ used = false, balance = 0n, signature = false } = {}) {
       const call = JSON.parse(body);
       const result = item => {
         if (item.method === "eth_chainId") return "0x2105";
+        if (item.method === "eth_blockNumber") return "0x100000";
+        if (item.method === "eth_getLogs") return options.logs ?? [];
+        if (item.method === "eth_getTransactionReceipt") return options.receipt ?? null;
         const data = item.params?.[0]?.data ?? item.params?.[0]?.input ?? "";
-        if (data.startsWith("0x70a08231")) return word(balance);
-        if (data.startsWith("0xe94a0102")) return word(used ? 1n : 0n);
-        return word(signature ? 1n : 0n);
+        if (data.startsWith("0x70a08231")) return word(options.balance ?? 0n);
+        if (data.startsWith("0xe94a0102")) return word(options.used ? 1n : 0n);
+        return word(options.signature ? 1n : 0n);
       };
       const answer = item => ({ jsonrpc: "2.0", id: item.id, result: result(item) });
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify(Array.isArray(call) ? call.map(answer) : answer(call)));
     });
   });
-  return new Promise(resolve => server.listen(0, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() })));
+  return new Promise(resolve => server.listen(0, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${server.address().port}`, options, close: () => server.close() })));
 }
 
 async function fakeSeller(broker, onPaid, window = 120) {
@@ -167,6 +171,64 @@ const ask = (seller, payment) => {
   asks += 1;
   return seller.handle("t", Buffer.from(JSON.stringify({ id: `a${asks}`, replyTo: `x402/v1/res/c${asks}/${asks}`, ...(payment ? { "x402/payment": payment } : {}) })));
 };
+
+const events = parseAbi(["event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)", "event Transfer(address indexed from, address indexed to, uint256 value)"]);
+const TX = `0x${"ab".repeat(32)}`;
+const BLOCK = `0x${"cd".repeat(32)}`;
+const log = (index, topics, data = "0x") => ({ address: USDC, blockHash: BLOCK, blockNumber: "0xfffff", data, logIndex: `0x${index.toString(16)}`, removed: false, topics, transactionHash: TX, transactionIndex: "0x0" });
+const usedLog = (from, nonce) => log(0, encodeEventTopics({ abi: events, eventName: "AuthorizationUsed", args: { authorizer: from, nonce } }));
+const transferLog = (from, to, value) => log(1, encodeEventTopics({ abi: events, eventName: "Transfer", args: { from, to } }), encodeAbiParameters([{ type: "uint256" }], [value]));
+const receiptWith = logs => ({ blockHash: BLOCK, blockNumber: "0xfffff", contractAddress: null, cumulativeGasUsed: "0x1", effectiveGasPrice: "0x1", from: PAY_TO, gasUsed: "0x1", logs, logsBloom: `0x${"0".repeat(512)}`, status: "0x1", to: USDC, transactionHash: TX, transactionIndex: "0x0", type: "0x2" });
+
+async function failedSettlement(setup) {
+  const rpc = await fakeRpc({ balance: 10n ** 12n, used: true });
+  const seller = makeSeller({ verify: 0 }, rpc, {
+    facilitator: {
+      verify: async () => ({ isValid: true }),
+      settle: async () => {
+        throw new Error("settlement failed");
+      },
+      getSupported: async () => ({ kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:8453" }], extensions: [], signers: {} }),
+    },
+  });
+  await seller.start();
+  const payment = await signed(seller);
+  const { from, nonce } = payment.payload.authorization;
+  setup(rpc, from, nonce);
+  try {
+    return await ask(seller, payment);
+  } finally {
+    rpc.close();
+  }
+}
+
+test("a cancelled nonce is never taken as payment", async () => {
+  const handled = await failedSettlement(() => {});
+  assert.equal(handled.reply.status, 503);
+  assert.equal(handled.reply.result, undefined);
+});
+
+test("a nonce spent on a transfer to someone else is never taken as payment", async () => {
+  const handled = await failedSettlement((rpc, from, nonce) => {
+    rpc.options.logs = [usedLog(from, nonce)];
+    rpc.options.receipt = receiptWith([usedLog(from, nonce), transferLog(from, "0x1111111111111111111111111111111111111111", 1000n)]);
+  });
+  assert.equal(handled.reply.status, 503);
+  assert.equal(handled.reply.result, undefined);
+});
+
+test("a real transfer to the payout for the exact amount still counts", async () => {
+  const handled = await failedSettlement((rpc, from, nonce) => {
+    rpc.options.logs = [usedLog(from, nonce)];
+    rpc.options.receipt = receiptWith([usedLog(from, nonce), transferLog(from, PAY_TO, 1000n)]);
+  });
+  assert.equal(handled.reply.status, 200);
+  assert.equal(handled.reply["x402/payment-response"].transaction, TX);
+});
+
+test("the seller never sends broker credentials in cleartext to a remote broker", async () => {
+  await assert.rejects(connectBridge({ url: "mqtt://broker.example.com:1883", username: "x402-bridge", password: "secret" }), /refusing to send broker credentials/);
+});
 
 test("forged payments never reach the facilitator or the ledger", async () => {
   const counter = { verify: 0 };

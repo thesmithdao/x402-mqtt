@@ -33,6 +33,13 @@ export type Catalog = { x402Version: 2; updatedAt: string; offers: CatalogEntry[
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
+export function requireTls(url: string, what: string, allowCleartext?: boolean): void {
+  const { protocol, hostname } = new URL(url);
+  if (protocol === "mqtts:" || protocol === "wss:" || allowCleartext) return;
+  if (hostname === "localhost" || hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(hostname)) return;
+  throw new Error(`refusing to send ${what} over ${protocol}// to ${hostname}: use mqtts:// or wss://, or set allowCleartext`);
+}
+
 export function isValidTopic(topic: string): boolean {
   if (topic.length === 0 || topic.length > 200) return false;
   if (topic.startsWith("/") || topic.startsWith("$")) return false;

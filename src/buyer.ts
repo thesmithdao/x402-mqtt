@@ -6,7 +6,7 @@ import mqtt from "mqtt";
 import { createPublicClient, http, parseAbi, parseUnits, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
-import { PAYMENT_KEY, PAYMENT_RESPONSE_KEY, REQUEST_PREFIX, RESPONSE_PREFIX, isReading, type Reading, type Reply } from "./spec.js";
+import { PAYMENT_KEY, PAYMENT_RESPONSE_KEY, REQUEST_PREFIX, RESPONSE_PREFIX, isReading, requireTls, type Reading, type Reply } from "./spec.js";
 
 export type BuyerOptions = {
   url: string;
@@ -33,13 +33,6 @@ const usdcAbi = parseAbi(["function authorizationState(address authorizer, bytes
 
 type Hold = { amount: bigint; asset: Address; nonce: Hex; validBefore: bigint };
 
-function checkTransport(url: string, allowCleartext?: boolean): void {
-  const { protocol, hostname } = new URL(url);
-  if (protocol === "mqtts:" || protocol === "wss:" || allowCleartext) return;
-  if (hostname === "localhost" || hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(hostname)) return;
-  throw new Error(`refusing to send payments over ${protocol}// to ${hostname}: use mqtts:// or wss://, or set allowCleartext`);
-}
-
 function authorizationOf(payment: PaymentPayload): { nonce?: Hex; validBefore?: string } | undefined {
   return (payment.payload as { authorization?: { nonce?: Hex; validBefore?: string } } | undefined)?.authorization;
 }
@@ -51,7 +44,7 @@ function holdOf(payment: PaymentPayload, amount: bigint, asset: Address): Hold |
 }
 
 export async function createBuyer(options: BuyerOptions) {
-  checkTransport(options.url, options.allowCleartext);
+  requireTls(options.url, "payments", options.allowCleartext);
   const network = options.network ?? "eip155:8453";
   const account = privateKeyToAccount(options.privateKey);
   const payer = new x402Client().register(network, new ExactEvmScheme(account));

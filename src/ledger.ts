@@ -11,6 +11,7 @@ export type LedgerEntry = {
   state: LedgerState;
   key?: string;
   payer?: string;
+  payTo?: string;
   amount?: string;
   network?: string;
   tx?: string;

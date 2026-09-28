@@ -65,12 +65,12 @@ Save it as `x402-mqtt.json` and run `x402-mqtt sell`. Readings older than 30 sec
 
 ## Works with Mosquitto
 
-Already running a broker? Set `"broker": "mqtt://…"` with the bridge's username and password, and use the access rules in [examples/mosquitto](examples/mosquitto): buyers can only ask and read their own replies, and only the bridge can read `raw/#`. The evidence was collected on Mosquitto 2.1.2.
+Already running a broker? Set `"broker"` to it with the bridge's username and password (`mqtts://` or `wss://` unless it runs on the same machine), and use the access rules in [examples/mosquitto](examples/mosquitto): buyers can only ask and read their own replies, and only the bridge can read `raw/#`. The evidence was collected on Mosquitto 2.1.2.
 
 ## Safety Notes
 
 - **Sellers hold no keys,** only a payout address. The facilitator key lives in the bridge and is never logged.
-- **Charged only for delivered data.** Settlement happens after the reading is in hand and before it's sent. Uncertain settlements are checked onchain before anything is delivered.
+- **Charged only for delivered data.** Settlement happens after the reading is in hand and before it's sent. Uncertain settlements are checked onchain, and count only if the exact USDC transfer to your payout is there.
 - **Idempotent payments.** Replays, duplicates and concurrent reuse of one payment are refused. MQTT redelivery never double-charges.
 - **Private data stays private.** Raw readings and other buyers' replies are blocked at the broker, and the built-in broker only accepts requests that reply to the sender itself.
 - **Floods stay cheap.** Forged and unfunded payments are refused before they reach the facilitator, and paid requests are limited per paying wallet, so a flood can't lock out buyers who already paid.
