@@ -2,11 +2,19 @@
 
 x402 payments over MQTT. Your devices sell their data to agents, paid in USDC on Base.
 
-The first x402 transport for MQTT, the protocol most connected devices already speak. 
+An x402 transport for MQTT, the protocol most connected devices already speak.
 
 ![architecture](docs/architecture.svg)
 
 The first real use case is a [MacBook selling](EVIDENCE.md) its own sensor readings on Base mainnet.
+
+## Try it live
+
+Two machines in Germany sell their own readings at [cultos.dev/machines](https://www.cultos.dev/machines). Buy one for $0.001 with a wallet holding a little USDC on Base:
+
+```bash
+X402_MQTT_BUYER_KEY=0x… npx @cultos/x402-mqtt buy machine01/uptime --broker wss://machines.cultos.dev/mqtt
+```
 
 ## Sell your Mac's readings
 

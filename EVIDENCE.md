@@ -1,6 +1,6 @@
 # Evidence
 
-Real runs on Base mainnet, 2026-09-28. A MacBook Air sells its sensor readings over MQTT (Mosquitto 2.1.2) and gets paid in USDC through the Coinbase facilitator. Nothing is mocked: every paid row links to its settlement on Basescan, and every "not charged" row was checked against the USDC contract.
+Real runs on Base mainnet, 2026-09-28. A MacBook Air sells its sensor readings over MQTT (Mosquitto 2.1.2) and gets paid in USDC through the Coinbase facilitator. Every paid row links to its settlement on Basescan, and every "not charged" row was checked against the USDC contract.
 
 The buyers are test wallets run by Cult OS. These are our own purchases, made to prove the pipeline, not customer sales.
 
