@@ -17,6 +17,8 @@ It reuses the x402 v2 objects unchanged: `PaymentRequired`, `PaymentPayload` and
 
 Brokers MUST restrict `raw/#` so only the seller can read it, and MUST restrict `x402/v1/res/<clientId>/#` so only the client with that id can read it.
 
+Requests carry payments that can be settled, so buyers MUST reach remote brokers over TLS (`mqtts://` or `wss://`). The broker and the seller see every payment. A buyer's client id is the key to its replies: it MUST be random, at least 128 bits, and never shared.
+
 ## Payment Flow Overview
 
 1. The buyer publishes a request for a topic without payment.
@@ -88,6 +90,8 @@ Reply:
 
 A buyer that gets no reply MUST resend the same request with the same `id` and the same payment. It MUST NOT sign a new payment for the same request.
 
+Whoever holds a signed payment can settle it until it expires. Buyers MUST count every payment they send as spent until its `validBefore` has passed and the token contract shows it unused, whatever the reply says, and SHOULD refuse quotes with long payment windows.
+
 ## Settlement Response Delivery
 
 **Mechanism**: the `x402/payment-response` field of a `status: 200` reply
@@ -126,7 +130,7 @@ Errors are replies with a non-200 `status` and an `error` string:
 
 Requests larger than 16 KB, or without a valid `id` and `replyTo`, are dropped with no reply.
 
-Sellers SHOULD rate-limit requests per requester and overall, and SHOULD cap how many payments per minute they send to the facilitator, because `replyTo` is chosen by the sender. Brokers that can read message bodies SHOULD only accept a request whose `replyTo` is under the sender's own client id.
+`replyTo` is chosen by the sender, so it is not an identity. Sellers SHOULD check the payment against the quote, its signature and the payer's balance before calling the facilitator, and SHOULD rate-limit paid requests per paying wallet. Brokers that can read message bodies SHOULD only accept a request whose `replyTo` is under the sender's own client id.
 
 If settlement times out, the seller MUST check the payment's on-chain state (for `exact` on EVM, `authorizationState(from, nonce)` on the token) before deciding. It delivers only if the transfer happened.
 

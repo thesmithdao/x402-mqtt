@@ -8,91 +8,91 @@
     {
       "scenario": "Paid reading · mac/battery/temperature",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "31.1 °C in 1.52s",
+      "result": "31 °C in 1.60s",
       "pass": true,
       "proof": [
-        "[0x6169e368…](https://basescan.org/tx/0x6169e368b89a28549e89db68df4876b90510af528245557955cffe0b5555e886)"
+        "[0xfd87cc99…](https://basescan.org/tx/0xfd87cc99d5dbcb10b0c0beaad4e0dc3c9872f01c93555bfdcf54e101339c7770)"
       ]
     },
     {
       "scenario": "Paid reading · mac/battery/level",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "100 % in 1.10s",
+      "result": "87 % in 1.56s",
       "pass": true,
       "proof": [
-        "[0x0724ef06…](https://basescan.org/tx/0x0724ef06878beef71dd19da7ef0e2c8e26b26c092c7e430e3cfd02c49e11400a)"
+        "[0xf88f5bce…](https://basescan.org/tx/0xf88f5bcef47fe220d34e1d2a125a35af26e3752276357f0bdd6f9008586789a1)"
       ]
     },
     {
       "scenario": "Paid reading · mac/power/watts",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "0 W in 1.60s",
+      "result": "11.4 W in 0.98s",
       "pass": true,
       "proof": [
-        "[0xc409483a…](https://basescan.org/tx/0xc409483a6467ded9d6a9a298e2011980fd8ce55657da9c1e1881e9a644f7f5c2)"
+        "[0x1c40176f…](https://basescan.org/tx/0x1c40176fb626a863abdfc44a835efcad7d240ebf80dbdfafa2aae354dae8522f)"
       ]
     },
     {
       "scenario": "Paid reading · mac/cpu/load",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "2.78 load in 1.56s",
+      "result": "2.06 load in 1.18s",
       "pass": true,
       "proof": [
-        "[0x6a5d22f1…](https://basescan.org/tx/0x6a5d22f1ec6a498943ad163852c2f4055c48339005141d75f9677abcbcda89b1)"
+        "[0xd37f613e…](https://basescan.org/tx/0xd37f613e50a45c6518bfc3ca3f812154f08de4b29e63f8562e00456d49326574)"
       ]
     },
     {
       "scenario": "Paid reading · mac/memory/free",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "36 % in 1.30s",
+      "result": "37 % in 1.02s",
       "pass": true,
       "proof": [
-        "[0x2223cd1a…](https://basescan.org/tx/0x2223cd1a8cb4800294c23ba5ea34c54b201c26d5af22e9fa0006d05ae3f26c72)"
+        "[0xbdf13cfd…](https://basescan.org/tx/0xbdf13cfd729abefe91610ddee109e629f02bc25b8af46e7e1238ce75d249ed4b)"
       ]
     },
     {
       "scenario": "Paid reading · mac/battery/cycles",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "1053 cycles in 1.74s",
+      "result": "1053 cycles in 1.42s",
       "pass": true,
       "proof": [
-        "[0xe0b53ae2…](https://basescan.org/tx/0xe0b53ae2a0b1cca5ea90952668323b72874d12d07292df2408260b7642523d3a)"
+        "[0x1174f1c3…](https://basescan.org/tx/0x1174f1c3ddcf8340018a64f693c488661a1ee3fedc9505af12d08b5810ef9660)"
       ]
     },
     {
       "scenario": "Paid reading · mac/thermal/pressure",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "normal in 1.37s",
+      "result": "normal in 1.28s",
       "pass": true,
       "proof": [
-        "[0xdab67e4e…](https://basescan.org/tx/0xdab67e4eaf88c3f850543f0e0a13af08335e6a51f1597d1b723ddf390cf0031a)"
+        "[0xac97bee7…](https://basescan.org/tx/0xac97bee7c36497b851cbf31ddbefaa55e12bbcffd118e6a5c1395aa39dbb3ecb)"
       ]
     },
     {
       "scenario": "Paid reading · mac/battery/temperature",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "31.1 °C in 1.21s",
+      "result": "31 °C in 1.23s",
       "pass": true,
       "proof": [
-        "[0x5f8c10ef…](https://basescan.org/tx/0x5f8c10efc036b26b82fb086c34a9b980c5c937df7ca9050716bb562a7b82a74c)"
+        "[0x91b49cbb…](https://basescan.org/tx/0x91b49cbb886c6563e83178d8f6be419ce45cf0f1bda405c5ac4e6c24195f37ec)"
       ]
     },
     {
       "scenario": "Paid reading · mac/power/watts",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "0 W in 1.30s",
+      "result": "11.4 W in 1.20s",
       "pass": true,
       "proof": [
-        "[0x9d030f6c…](https://basescan.org/tx/0x9d030f6c5be61b2f6614fd9e4d259bfb2e72515e8abbcd02b7570fb81c812abd)"
+        "[0xc3f0a07d…](https://basescan.org/tx/0xc3f0a07d45e16248cd7bbb62c9e0ba9c8ba9df3d9ca010aa0f775f6238b5575c)"
       ]
     },
     {
       "scenario": "Paid reading · mac/cpu/load",
       "expected": "reading delivered, exactly $0.001 moved on-chain",
-      "result": "2.73 load in 0.83s",
+      "result": "2.19 load in 1.05s",
       "pass": true,
       "proof": [
-        "[0xa2e63a6c…](https://basescan.org/tx/0xa2e63a6cde136bd0734c974127e41b241e1d4f7e36fbd5103e9b52cc4de38f6f)"
+        "[0x11b3e767…](https://basescan.org/tx/0x11b3e767680a45e5c4012e89e8520736e39a45b1fa0ca4939665ecdd477f20b4)"
       ]
     },
     {
@@ -101,7 +101,7 @@
       "result": "first 200, replay 409 payment already used",
       "pass": true,
       "proof": [
-        "[0x5611ea0b…](https://basescan.org/tx/0x5611ea0bdb0181a1625d11d6c903f7768499636e08d3ffbcb35e3988cf4434a7)"
+        "[0x4d02b60d…](https://basescan.org/tx/0x4d02b60d16be7789d1ed58a6d775b20053ca1ff6be9a2aeb8a028f960d6b3573)"
       ]
     },
     {
@@ -110,7 +110,7 @@
       "result": "replies 409, 200, 200, distinct settlements 1",
       "pass": true,
       "proof": [
-        "[0x78829d4f…](https://basescan.org/tx/0x78829d4fbff1d0e5d4e5747e004c066d284d4fa94a84b3db2e108d65bec6d900)"
+        "[0xae53ea91…](https://basescan.org/tx/0xae53ea91ef56786f27ce3abe5a5943dc6dc0b13439cbcd4463a29fbaf12b9345)"
       ]
     },
     {
@@ -119,7 +119,7 @@
       "result": "200 + 409",
       "pass": true,
       "proof": [
-        "[0xcad60147…](https://basescan.org/tx/0xcad60147909af98620bb3826ea64e598e4af4823dbf68ef9a8f53b3095b660f6)"
+        "[0x0fe03177…](https://basescan.org/tx/0x0fe031775e6c3d302d3cc2b996decb39e001053e1cb2ee19e1fb19ebb8f1d77b)"
       ]
     },
     {
@@ -159,15 +159,15 @@
     }
   ],
   "timings": [
-    1516,
-    1100,
-    1599,
-    1558,
-    1296,
-    1736,
-    1372,
-    1210,
-    1300,
-    835
+    1598,
+    1556,
+    984,
+    1184,
+    1016,
+    1419,
+    1279,
+    1225,
+    1202,
+    1049
   ]
 }

@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { x402Client } from "@x402/core/client";
+import { ExactEvmScheme } from "@x402/evm/exact/client";
 import mqtt from "mqtt";
+import { privateKeyToAccount } from "viem/accounts";
 import { Ledger, Seller, SpendCapError, createBuyer, startBuiltInBroker } from "../dist/index.js";
+import { startPage } from "../dist/page.js";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -27,13 +32,35 @@ function fakeFacilitator(counter) {
   };
 }
 
-async function fakeSeller(broker, onPaid) {
+function fakeRpc({ used = false, balance = 0n, signature = false } = {}) {
+  const word = value => `0x${value.toString(16).padStart(64, "0")}`;
+  const server = createServer((request, response) => {
+    let body = "";
+    request.on("data", chunk => (body += chunk));
+    request.on("end", () => {
+      const call = JSON.parse(body);
+      const result = item => {
+        if (item.method === "eth_chainId") return "0x2105";
+        const data = item.params?.[0]?.data ?? item.params?.[0]?.input ?? "";
+        if (data.startsWith("0x70a08231")) return word(balance);
+        if (data.startsWith("0xe94a0102")) return word(used ? 1n : 0n);
+        return word(signature ? 1n : 0n);
+      };
+      const answer = item => ({ jsonrpc: "2.0", id: item.id, result: result(item) });
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(Array.isArray(call) ? call.map(answer) : answer(call)));
+    });
+  });
+  return new Promise(resolve => server.listen(0, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${server.address().port}`, close: () => server.close() })));
+}
+
+async function fakeSeller(broker, onPaid, window = 120) {
   const client = await mqtt.connectAsync(broker.url, { username: broker.username, password: broker.password });
   await client.subscribeAsync("x402/v1/req/#", { qos: 1 });
   client.on("message", async (_topic, payload) => {
     const ask = JSON.parse(payload.toString());
     if (!ask["x402/payment"]) {
-      client.publish(ask.replyTo, JSON.stringify({ id: ask.id, status: 402, paymentRequired: { x402Version: 2, resource: { url: "mqtt://test/t", description: "t", mimeType: "application/json" }, accepts: [accept] } }), { qos: 1 });
+      client.publish(ask.replyTo, JSON.stringify({ id: ask.id, status: 402, paymentRequired: { x402Version: 2, resource: { url: "mqtt://test/t", description: "t", mimeType: "application/json" }, accepts: [{ ...accept, maxTimeoutSeconds: window }] } }), { qos: 1 });
       return;
     }
     await wait(50);
@@ -59,13 +86,14 @@ test("concurrent buys never exceed the total cap", async () => {
   }
 });
 
-test("a not-charged reply releases the reserved amount", async () => {
+test("a seller that claims not charged cannot get past the cap", async () => {
   const broker = await startBuiltInBroker({ port: port() });
   const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503, error: "device offline, not charged" }));
-  const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001" });
+  const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.002" });
   try {
     await assert.rejects(buyer.buy("t"), /503/);
     await assert.rejects(buyer.buy("t"), /503/);
+    await assert.rejects(buyer.buy("t"), SpendCapError);
   } finally {
     await buyer.close();
     await seller.endAsync();
@@ -73,9 +101,50 @@ test("a not-charged reply releases the reserved amount", async () => {
   }
 });
 
-test("a flood of fake requesters cannot run up facilitator calls or limiter state", async () => {
-  const counter = { verify: 0 };
-  const seller = new Seller({
+test("a held payment is released only after it expires unused on-chain", async () => {
+  const broker = await startBuiltInBroker({ port: port() });
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503, error: "device offline, not charged" }), 1);
+  const unused = await fakeRpc({ used: false });
+  const used = await fakeRpc({ used: true });
+  const honest = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001", rpcUrl: unused.url });
+  const cheated = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001", rpcUrl: used.url });
+  try {
+    await assert.rejects(honest.buy("t"), /503/);
+    await assert.rejects(cheated.buy("t"), /503/);
+    await assert.rejects(honest.buy("t"), SpendCapError);
+    await wait(12_500);
+    await assert.rejects(honest.buy("t"), /503/);
+    await assert.rejects(cheated.buy("t"), SpendCapError);
+  } finally {
+    await honest.close();
+    await cheated.close();
+    unused.close();
+    used.close();
+    await seller.endAsync();
+    await broker.close();
+  }
+});
+
+test("quotes with long payment windows are refused", async () => {
+  const broker = await startBuiltInBroker({ port: port() });
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503 }), 3600);
+  const buyer = await createBuyer({ url: broker.url, privateKey: key() });
+  try {
+    await assert.rejects(buyer.buy("t"), /payment window/);
+  } finally {
+    await buyer.close();
+    await seller.endAsync();
+    await broker.close();
+  }
+});
+
+test("payments are never sent in cleartext to a remote broker", async () => {
+  await assert.rejects(createBuyer({ url: "mqtt://broker.example.com:1883", privateKey: key() }), /mqtts:\/\/ or wss:\/\//);
+  await assert.rejects(createBuyer({ url: "ws://10.0.0.5:9001/mqtt", privateKey: key() }), /refusing/);
+});
+
+function makeSeller(counter, rpc, extra = {}) {
+  return new Seller({
     offers: [{ topic: "t", price: "0.001" }],
     payTo: PAY_TO,
     network: "eip155:8453",
@@ -83,19 +152,167 @@ test("a flood of fake requesters cannot run up facilitator calls or limiter stat
     ledger: new Ledger(join(mkdtempSync(join(tmpdir(), "x402-mqtt-")), "ledger.jsonl")),
     readings: () => ({ value: 1, ts: Date.now() }),
     resourceBase: "mqtt://test",
+    rpcUrl: rpc.url,
+    ...extra,
   });
+}
+
+async function signed(seller, privateKey = key()) {
+  const paymentRequired = { x402Version: 2, resource: { url: "mqtt://test/t", description: "t", mimeType: "application/json" }, accepts: seller.catalog().offers[0].accepts };
+  return new x402Client().register("eip155:8453", new ExactEvmScheme(privateKeyToAccount(privateKey))).createPaymentPayload(paymentRequired);
+}
+
+let asks = 0;
+const ask = (seller, payment) => {
+  asks += 1;
+  return seller.handle("t", Buffer.from(JSON.stringify({ id: `a${asks}`, replyTo: `x402/v1/res/c${asks}/${asks}`, ...(payment ? { "x402/payment": payment } : {}) })));
+};
+
+test("forged payments never reach the facilitator or the ledger", async () => {
+  const counter = { verify: 0 };
+  const rpc = await fakeRpc({ balance: 10n ** 12n });
+  const seller = makeSeller(counter, rpc);
   await seller.start();
   const accepted = seller.catalog().offers[0].accepts[0];
-  let quotes = 0;
-  for (let index = 0; index < 2000; index += 1) {
-    const replyTo = `x402/v1/res/fake-${index}/${index}`;
-    const paid = index % 2 === 1;
-    const payment = { x402Version: 2, accepted, payload: { signature: "0x00", authorization: { from: PAY_TO, to: PAY_TO, value: "1000", validAfter: "0", validBefore: "9999999999", nonce: `0x${randomBytes(32).toString("hex")}` } } };
-    const handled = await seller.handle("t", Buffer.from(JSON.stringify({ id: `a${index}`, replyTo, ...(paid ? { "x402/payment": payment } : {}) })));
-    if (handled?.reply.status === 402) quotes += 1;
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    for (let index = 0; index < 1000; index += 1) {
+      const from = privateKeyToAccount(key()).address;
+      await ask(seller, { x402Version: 2, accepted, payload: { signature: `0x${randomBytes(65).toString("hex")}`, authorization: { from, to: PAY_TO, value: "1000", validAfter: String(now - 60), validBefore: String(now + 120), nonce: `0x${randomBytes(32).toString("hex")}` } } });
+    }
+    assert.equal(counter.verify, 0);
+    assert.equal(seller.options.ledger.all().length, 0);
+  } finally {
+    rpc.close();
   }
-  assert.ok(counter.verify <= 120, `facilitator verified ${counter.verify} fake payments`);
-  assert.ok(quotes <= 600, `answered ${quotes} quotes`);
+});
+
+test("unfunded signers never reach the facilitator", async () => {
+  const counter = { verify: 0 };
+  const rpc = await fakeRpc({ balance: 0n });
+  const seller = makeSeller(counter, rpc);
+  await seller.start();
+  try {
+    for (let index = 0; index < 20; index += 1) {
+      const handled = await ask(seller, await signed(seller));
+      assert.equal(handled.reply.status, 400);
+    }
+    assert.equal(counter.verify, 0);
+  } finally {
+    rpc.close();
+  }
+});
+
+test("a known buyer keeps paying through a flood of new signers", async () => {
+  const counter = { verify: 0 };
+  const rpc = await fakeRpc({ balance: 10n ** 12n });
+  const seller = makeSeller(counter, rpc, { paymentsPerMinute: 20 });
+  await seller.start();
+  const buyerKey = key();
+  try {
+    await ask(seller, await signed(seller, buyerKey));
+    const before = counter.verify;
+    const statuses = [];
+    for (let index = 0; index < 60; index += 1) statuses.push((await ask(seller, await signed(seller))).reply.status);
+    assert.ok(statuses.includes(429));
+    const during = counter.verify;
+    await ask(seller, await signed(seller, buyerKey));
+    assert.equal(counter.verify, during + 1);
+    assert.ok(before >= 1);
+  } finally {
+    rpc.close();
+  }
+});
+
+test("forged payments in a known buyer's name cannot block that buyer", async () => {
+  const counter = { verify: 0 };
+  const rpc = await fakeRpc({ balance: 10n ** 12n, signature: false });
+  const seller = makeSeller(counter, rpc);
+  await seller.start();
+  const buyerKey = key();
+  const from = privateKeyToAccount(buyerKey).address;
+  const accepted = seller.catalog().offers[0].accepts[0];
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await ask(seller, await signed(seller, buyerKey));
+    for (let index = 0; index < 100; index += 1) {
+      await ask(seller, { x402Version: 2, accepted, payload: { signature: `0x${randomBytes(65).toString("hex")}`, authorization: { from, to: PAY_TO, value: "1000", validAfter: String(now - 60), validBefore: String(now + 120), nonce: `0x${randomBytes(32).toString("hex")}` } } });
+    }
+    const before = counter.verify;
+    await ask(seller, await signed(seller, buyerKey));
+    assert.equal(counter.verify, before + 1);
+  } finally {
+    rpc.close();
+  }
+});
+
+test("quotes stay cheap and do not need a global cap", async () => {
+  const counter = { verify: 0 };
+  const rpc = await fakeRpc();
+  const seller = makeSeller(counter, rpc);
+  await seller.start();
+  try {
+    let quotes = 0;
+    for (let index = 0; index < 2000; index += 1) if ((await ask(seller)).reply.status === 402) quotes += 1;
+    assert.equal(quotes, 2000);
+    assert.equal(counter.verify, 0);
+  } finally {
+    rpc.close();
+  }
+});
+
+test("buyers only sign for USDC", async () => {
+  const broker = await startBuiltInBroker({ port: port() });
+  const client = await mqtt.connectAsync(broker.url, { username: broker.username, password: broker.password });
+  await client.subscribeAsync("x402/v1/req/#", { qos: 1 });
+  client.on("message", (_topic, payload) => {
+    const request = JSON.parse(payload.toString());
+    client.publish(request.replyTo, JSON.stringify({ id: request.id, status: 402, paymentRequired: { x402Version: 2, resource: { url: "mqtt://test/t", description: "t", mimeType: "application/json" }, accepts: [{ ...accept, asset: "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42" }] } }), { qos: 1 });
+  });
+  const buyer = await createBuyer({ url: broker.url, privateKey: key() });
+  try {
+    await assert.rejects(buyer.buy("t"), /only USDC/);
+  } finally {
+    await buyer.close();
+    await client.endAsync();
+    await broker.close();
+  }
+});
+
+test("a malformed reading from the seller is rejected", async () => {
+  const broker = await startBuiltInBroker({ port: port() });
+  const seller = await fakeSeller(broker, request => ({ id: request.id, status: 200, result: { value: { evil: true }, ts: Date.now() }, "x402/payment-response": { success: true, transaction: "0x1", network: "eip155:8453", payer: PAY_TO } }));
+  const buyer = await createBuyer({ url: broker.url, privateKey: key() });
+  try {
+    await assert.rejects(buyer.buy("t"), /malformed/);
+  } finally {
+    await buyer.close();
+    await seller.endAsync();
+    await broker.close();
+  }
+});
+
+test("the local page only answers its own host", async () => {
+  const counter = { verify: 0 };
+  const rpc = await fakeRpc();
+  const seller = makeSeller(counter, rpc);
+  await seller.start();
+  const pagePort = port();
+  const server = await startPage({ port: pagePort, seller, ledger: seller.options.ledger, offers: [{ topic: "t", price: "0.001" }], latest: new Map(), testBuyers: [] });
+  const status = host => new Promise(resolve => {
+    import("node:http").then(({ request }) => request({ host: "127.0.0.1", port: pagePort, path: "/api/state", headers: { host } }, response => {
+      response.resume();
+      resolve(response.statusCode);
+    }).end());
+  });
+  try {
+    assert.equal(await status(`127.0.0.1:${pagePort}`), 200);
+    assert.equal(await status(`localhost:${pagePort}`), 200);
+    assert.equal(await status("rebind.attacker.example"), 403);
+  } finally {
+    server.close();
+    rpc.close();
+  }
 });
 
 test("the built-in broker drops requests that reply to someone else", async () => {
@@ -118,19 +335,14 @@ test("the built-in broker drops requests that reply to someone else", async () =
 });
 
 test("limiter state stays bounded under unique requesters", async () => {
-  const seller = new Seller({
-    offers: [{ topic: "t", price: "0.001" }],
-    payTo: PAY_TO,
-    network: "eip155:8453",
-    facilitator: fakeFacilitator({ verify: 0 }),
-    ledger: new Ledger(join(mkdtempSync(join(tmpdir(), "x402-mqtt-")), "ledger.jsonl")),
-    readings: () => ({ value: 1, ts: Date.now() }),
-    resourceBase: "mqtt://test",
-    maxRequesters: 100,
-  });
+  const counter = { verify: 0 };
+  const rpc = await fakeRpc();
+  const seller = makeSeller(counter, rpc, { maxRequesters: 100 });
   await seller.start();
-  for (let index = 0; index < 2000; index += 1) {
-    await seller.handle("t", Buffer.from(JSON.stringify({ id: `a${index}`, replyTo: `x402/v1/res/fake-${index}/${index}` })));
+  try {
+    for (let index = 0; index < 2000; index += 1) await ask(seller);
+    assert.ok(seller.buckets.size <= 100, `kept ${seller.buckets.size} requesters`);
+  } finally {
+    rpc.close();
   }
-  assert.ok(seller.buckets.size <= 100, `kept ${seller.buckets.size} requesters`);
 });

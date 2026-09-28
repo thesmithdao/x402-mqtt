@@ -61,16 +61,21 @@ export function parseAsk(payload: Buffer): Ask | undefined {
   return { id: ask.id, replyTo: ask.replyTo, [PAYMENT_KEY]: payment as PaymentPayload | undefined };
 }
 
+export function isReading(value: unknown): value is Reading {
+  if (!value || typeof value !== "object") return false;
+  const { value: reading, unit, ts } = value as Record<string, unknown>;
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return false;
+  if (typeof reading === "number" && !Number.isFinite(reading)) return false;
+  if (typeof reading !== "number" && (typeof reading !== "string" || reading.length > 256)) return false;
+  return unit === undefined || (typeof unit === "string" && unit.length <= 16);
+}
+
 export function parseReading(payload: Buffer): Reading | undefined {
   if (payload.length > 1024) return undefined;
   try {
     const value = JSON.parse(payload.toString("utf8")) as Record<string, unknown>;
-    const reading = value.value;
-    if (typeof value.ts !== "number" || !Number.isFinite(value.ts)) return undefined;
-    if (typeof reading === "number" && !Number.isFinite(reading)) return undefined;
-    if (typeof reading !== "number" && (typeof reading !== "string" || reading.length > 256)) return undefined;
-    if (value.unit !== undefined && (typeof value.unit !== "string" || value.unit.length > 16)) return undefined;
-    return { value: reading, unit: value.unit as string | undefined, ts: value.ts };
+    if (!isReading(value)) return undefined;
+    return { value: value.value, unit: value.unit, ts: value.ts };
   } catch {
     return undefined;
   }

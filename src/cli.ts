@@ -15,7 +15,7 @@ import { hasBattery, macOffers, startMacSource } from "./sources/mac.js";
 const help = `x402-mqtt · x402 payments over MQTT
 
   x402-mqtt sell --payout 0x… [--mac] [--price 0.001] [--broker mqtt://…] [--facilitator coinbase|https://…]
-  x402-mqtt buy <topic> [--broker mqtt://127.0.0.1:1883] [--max 0.01]      (X402_MQTT_BUYER_KEY)
+  x402-mqtt buy <topic> [--broker mqtt://127.0.0.1:1883] [--max 0.01] [--allow-cleartext]      (X402_MQTT_BUYER_KEY)
   x402-mqtt export [--out dataset]
 
   sell reads x402-mqtt.json when present. The coinbase facilitator needs CDP_API_KEY_ID and CDP_API_KEY_SECRET.`;
@@ -92,12 +92,15 @@ async function buy(topic: string | undefined, values: Record<string, string | bo
     url: (values.broker as string | undefined) ?? "mqtt://127.0.0.1:1883",
     privateKey: (key.startsWith("0x") ? key : `0x${key}`) as Hex,
     maxPerCall: (values.max as string | undefined) ?? "0.01",
+    allowCleartext: values["allow-cleartext"] === true,
   });
   try {
     const purchase = await buyer.buy(topic);
-    const value = `${purchase.reading.value}${purchase.reading.unit ? ` ${purchase.reading.unit}` : ""}`;
-    console.log(`paid $${Number(purchase.amount) / 1e6} · ${value} · tx ${purchase.settlement.transaction}`);
-    console.log(`https://basescan.org/tx/${purchase.settlement.transaction}`);
+    const clean = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+    const value = clean(`${purchase.reading.value}${purchase.reading.unit ? ` ${purchase.reading.unit}` : ""}`);
+    const tx = /^0x[0-9a-fA-F]{64}$/.test(purchase.settlement.transaction) ? purchase.settlement.transaction : "unknown";
+    console.log(`paid $${Number(purchase.amount) / 1e6} · ${value} · tx ${tx}`);
+    if (tx !== "unknown") console.log(`https://basescan.org/tx/${tx}`);
   } finally {
     await buyer.close();
   }
@@ -114,6 +117,7 @@ async function main() {
       price: { type: "string" },
       host: { type: "string" },
       mac: { type: "boolean" },
+      "allow-cleartext": { type: "boolean" },
       max: { type: "string" },
       out: { type: "string" },
       help: { type: "boolean", short: "h" },

@@ -54,11 +54,11 @@ table{width:100%;border-collapse:collapse}td{padding:7px 0;border-top:1px solid 
 <div class="stats"><div><div class="n acc" id="earned">$0</div><div class="l">Earned</div></div><div><div class="n" id="sales">0</div><div class="l">Sales</div></div><div><div class="n" id="buyers">0</div><div class="l">Buyers</div></div><div><div class="n" id="median">–</div><div class="l">Median</div></div></div>
 <section><h2>Topics</h2><table id="topics"></table></section><section><h2>Sales</h2><table id="salesList"></table></section><section><h2>Refused</h2><table id="refusedList"></table></section>
 </main><script>
-const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const time=t=>new Date(t).toLocaleTimeString();
 function render(s){earned.textContent="$"+s.earnedUsd.toFixed(3);sales.textContent=s.sales;buyers.textContent=s.buyers;median.textContent=s.medianMs?(s.medianMs/1000).toFixed(1)+"s":"–";
 topics.innerHTML=s.topics.map(t=>"<tr><td>"+esc(t.topic)+"</td><td class=r>$"+esc(t.price)+"</td><td class=r>"+t.sold+" sold</td><td class='r m'>"+(t.live?esc(t.live.value)+" "+esc(t.live.unit||""):"offline")+"</td></tr>").join("");
-salesList.innerHTML=s.recentSales.map(e=>"<tr><td class=m>"+time(e.ts)+"</td><td>"+esc(e.topic)+"</td><td class=m>"+esc(e.buyer)+"</td><td class=r><a href='https://basescan.org/tx/"+esc(e.tx)+"' target=_blank rel=noreferrer>"+esc((e.tx||"").slice(0,10))+"…</a></td></tr>").join("")||"<tr><td class=m>No sales yet</td></tr>";
+salesList.innerHTML=s.recentSales.map(e=>"<tr><td class=m>"+time(e.ts)+"</td><td>"+esc(e.topic)+"</td><td class=m>"+esc(e.buyer)+"</td><td class=r>"+(/^0x[0-9a-fA-F]{64}$/.test(e.tx||"")?"<a href='https://basescan.org/tx/"+e.tx+"' target=_blank rel=noreferrer>"+e.tx.slice(0,10)+"…</a>":"")+"</td></tr>").join("")||"<tr><td class=m>No sales yet</td></tr>";
 refusedList.innerHTML=s.recentRefused.map(e=>"<tr><td class=m>"+time(e.ts)+"</td><td>"+esc(e.topic)+"</td><td class=r>"+esc(e.error)+"</td></tr>").join("")||"<tr><td class=m>Nothing refused</td></tr>";}
 fetch("/api/state").then(r=>r.json()).then(render);const events=new EventSource("/events");events.onmessage=m=>render(JSON.parse(m.data));
 </script></body></html>`;
@@ -73,7 +73,12 @@ export function startPage(options: PageOptions): Promise<http.Server> {
   options.seller.on("entry", push);
   setInterval(push, 5000).unref();
 
+  const hosts = new Set([`127.0.0.1:${options.port}`, `localhost:${options.port}`]);
   const server = http.createServer((request, response) => {
+    if (!hosts.has(request.headers.host ?? "")) {
+      response.writeHead(403);
+      return response.end();
+    }
     if (request.url === "/api/state") {
       response.writeHead(200, { "content-type": "application/json" });
       return response.end(state());
