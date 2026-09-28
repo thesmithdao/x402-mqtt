@@ -7,6 +7,15 @@ export type BuiltInBroker = { url: string; username: string; password: string; c
 
 type Role = "bridge" | "buyer";
 
+function repliesToSelf(clientId: string, payload: Buffer | string): boolean {
+  try {
+    const replyTo = (JSON.parse(payload.toString()) as { replyTo?: unknown }).replyTo;
+    return typeof replyTo === "string" && replyTo.startsWith(`${RESPONSE_PREFIX}${clientId}/`);
+  } catch {
+    return false;
+  }
+}
+
 function ownsResponseTopic(clientId: string, topic: string): boolean {
   const own = `${RESPONSE_PREFIX}${clientId}/`;
   if (!topic.startsWith(own) || topic.includes("+")) return false;
@@ -37,7 +46,7 @@ export async function startBuiltInBroker(options: { host?: string; port?: number
     authorizePublish(client, packet, callback) {
       const role = client ? roles.get(client) : "bridge";
       if (role === "bridge") return callback(null);
-      if (packet.topic.startsWith(REQUEST_PREFIX)) return callback(null);
+      if (client && packet.topic.startsWith(REQUEST_PREFIX) && repliesToSelf(client.id, packet.payload)) return callback(null);
       callback(new Error("not allowed"));
     },
     authorizeSubscribe(client, subscription, callback) {

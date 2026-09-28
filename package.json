@@ -1,6 +1,6 @@
 {
   "name": "@cultos/x402-mqtt",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "x402 payments over MQTT. Sell device data to agents, settled in USDC on Base.",
   "license": "MIT",
   "type": "module",
@@ -15,6 +15,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json && chmod +x dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs",
     "evidence": "node --env-file=.env dist/evidence.js"
   },
   "dependencies": {

@@ -18,7 +18,12 @@ export type SellerOptions = {
   maxAgeMs?: number;
   rpcUrl?: string;
   rateLimitPerMinute?: number;
+  quotesPerMinute?: number;
+  paymentsPerMinute?: number;
+  maxRequesters?: number;
 };
+
+type Bucket = { tokens: number; at: number };
 
 export type Handled = { replyTo: string; reply: Reply };
 
@@ -39,7 +44,9 @@ export class Seller extends EventEmitter {
   private server: x402ResourceServer;
   private requirements = new Map<string, PaymentRequirements[]>();
   private inflight = new Set<string>();
-  private buckets = new Map<string, { tokens: number; at: number }>();
+  private buckets = new Map<string, Bucket>();
+  private quotes: Bucket = { tokens: 0, at: 0 };
+  private payments: Bucket = { tokens: 0, at: 0 };
   private chain;
 
   constructor(private readonly options: SellerOptions) {
@@ -87,6 +94,7 @@ export class Seller extends EventEmitter {
     const payment = ask[PAYMENT_KEY];
     const offer = this.options.offers.find(item => item.topic === topic);
     if (!payment) {
+      if (!this.take(this.quotes, this.options.quotesPerMinute ?? 600)) return reply(429, { error: "too many requests" });
       const paymentRequired = await this.server.createPaymentRequiredResponse(accepts, {
         url: `${this.options.resourceBase}/${topic}`,
         description: offer?.description ?? topic,
@@ -95,6 +103,7 @@ export class Seller extends EventEmitter {
       return reply(402, { paymentRequired });
     }
 
+    if (!this.take(this.payments, this.options.paymentsPerMinute ?? 120)) return reply(429, { error: "too many requests, not charged" });
     const authorization = authorizationOf(payment);
     if (!authorization) return reply(400, { error: "unsupported payment payload" });
     const key = `${this.options.network}:${authorization.from.toLowerCase()}:${authorization.nonce.toLowerCase()}`;
@@ -161,11 +170,23 @@ export class Seller extends EventEmitter {
   private allow(replyTo: string): boolean {
     const client = replyTo.split("/")[3] ?? replyTo;
     const limit = this.options.rateLimitPerMinute ?? 60;
+    const max = this.options.maxRequesters ?? 10_000;
     const now = Date.now();
-    const bucket = this.buckets.get(client) ?? { tokens: limit, at: now };
-    bucket.tokens = Math.min(limit, bucket.tokens + ((now - bucket.at) / 60_000) * limit);
+    let bucket = this.buckets.get(client);
+    if (!bucket) {
+      if (this.buckets.size >= max) {
+        for (const [id, idle] of this.buckets) if (now - idle.at >= 60_000) this.buckets.delete(id);
+      }
+      if (this.buckets.size >= max) return false;
+      bucket = { tokens: limit, at: now };
+      this.buckets.set(client, bucket);
+    }
+    return this.take(bucket, limit, now);
+  }
+
+  private take(bucket: Bucket, limit: number, now = Date.now()): boolean {
+    bucket.tokens = bucket.at ? Math.min(limit, bucket.tokens + ((now - bucket.at) / 60_000) * limit) : limit;
     bucket.at = now;
-    this.buckets.set(client, bucket);
     if (bucket.tokens < 1) return false;
     bucket.tokens -= 1;
     return true;

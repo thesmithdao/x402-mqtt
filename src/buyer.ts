@@ -20,6 +20,8 @@ export type Purchase = { topic: string; reading: Reading; settlement: SettleResp
 
 export class SpendCapError extends Error {}
 
+const NOT_CHARGED = new Set([400, 402, 404, 429, 503]);
+
 export async function createBuyer(options: BuyerOptions) {
   const network = options.network ?? "eip155:8453";
   const account = privateKeyToAccount(options.privateKey);
@@ -75,8 +77,14 @@ export async function createBuyer(options: BuyerOptions) {
     const amount = BigInt(accept.amount);
     if (amount > maxPerCall) throw new SpendCapError(`price ${accept.amount} is above the per-call cap`);
     if (spent + amount > maxTotal) throw new SpendCapError("total spending cap reached");
-    const payment = await payer.createPaymentPayload({ ...paymentRequired, accepts: [accept] });
-    return { payment, amount };
+    spent += amount;
+    try {
+      const payment = await payer.createPaymentPayload({ ...paymentRequired, accepts: [accept] });
+      return { payment, amount };
+    } catch (error) {
+      spent -= amount;
+      throw error;
+    }
   }
 
   async function pay(topic: string, id: string, payment: PaymentPayload): Promise<Reply> {
@@ -93,11 +101,10 @@ export async function createBuyer(options: BuyerOptions) {
     const started = performance.now();
     const { id, paymentRequired } = await quote(topic);
     const { payment, amount } = await sign(paymentRequired);
-    spent += amount;
     const reply = await pay(topic, id, payment);
     const settlement = reply[PAYMENT_RESPONSE_KEY];
     if (reply.status !== 200 || !reply.result || !settlement) {
-      spent -= amount;
+      if (NOT_CHARGED.has(reply.status)) spent -= amount;
       throw new Error(`${reply.status} ${reply.error ?? "not delivered"}`);
     }
     return { topic, reading: reply.result, settlement, amount: amount.toString(), ms: Math.round(performance.now() - started) };

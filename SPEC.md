@@ -126,6 +126,8 @@ Errors are replies with a non-200 `status` and an `error` string:
 
 Requests larger than 16 KB, or without a valid `id` and `replyTo`, are dropped with no reply.
 
+Sellers SHOULD rate-limit requests per requester and overall, and SHOULD cap how many payments per minute they send to the facilitator, because `replyTo` is chosen by the sender. Brokers that can read message bodies SHOULD only accept a request whose `replyTo` is under the sender's own client id.
+
 If settlement times out, the seller MUST check the payment's on-chain state (for `exact` on EVM, `authorizationState(from, nonce)` on the token) before deciding. It delivers only if the transfer happened.
 
 ## References

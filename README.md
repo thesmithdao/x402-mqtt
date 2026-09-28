@@ -72,8 +72,9 @@ Already running a broker? Set `"broker": "mqtt://…"` with the bridge's usernam
 - **Sellers hold no keys,** only a payout address. The facilitator key lives in the bridge and is never logged.
 - **Charged only for delivered data.** Settlement happens after the reading is in hand and before it's sent. Uncertain settlements are checked onchain before anything is delivered.
 - **Idempotent payments.** Replays, duplicates and concurrent reuse of one payment are refused. MQTT redelivery never double-charges.
-- **Private data stays private.** Raw readings and other buyers' replies are blocked at the broker. Requests are size-limited and rate-limited.
-- **Buyers have caps,** per call and in total, and resend the same payment instead of signing a new one.
+- **Private data stays private.** Raw readings and other buyers' replies are blocked at the broker, and the built-in broker only accepts requests that reply to the sender itself.
+- **Floods stay cheap.** Requests are size-limited and rate-limited per buyer and overall, so fake payments can't run up facilitator calls.
+- **Buyers have caps,** per call and in total, held even when buys run in parallel, and resend the same payment instead of signing a new one.
 
 ## datasets
 
