@@ -71,6 +71,8 @@ Anything that publishes to MQTT can sell. Point the device at `raw/<topic>` and 
 
 Save it as `x402-mqtt.json` and run `x402-mqtt sell`. Readings older than 30 seconds count as offline and are never sold.
 
+Examples for a Mac, a Linux server and an Android phone: [docs/devices.md](docs/devices.md).
+
 ## Works with Mosquitto
 
 Already running a broker? Set `"broker"` to it with the bridge's username and password (`mqtts://` or `wss://` unless it runs on the same machine), and use the access rules in [examples/mosquitto](examples/mosquitto): buyers can only ask and read their own replies, and only the bridge can read `raw/#`. The evidence was collected on Mosquitto 2.1.2.
