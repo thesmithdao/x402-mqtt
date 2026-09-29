@@ -1,6 +1,6 @@
 {
   "name": "@cultos/x402-mqtt",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "x402 payments over MQTT. Sell device data to agents, settled in USDC on Base.",
   "license": "MIT",
   "type": "module",

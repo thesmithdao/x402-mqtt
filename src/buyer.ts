@@ -46,6 +46,8 @@ function holdOf(payment: PaymentPayload, amount: bigint, asset: Address): Hold |
 export async function createBuyer(options: BuyerOptions) {
   requireTls(options.url, "payments", options.allowCleartext);
   const network = options.network ?? "eip155:8453";
+  const usdc = USDC[network];
+  if (!usdc) throw new Error(`unsupported network ${network}, only Base and Base Sepolia USDC`);
   const account = privateKeyToAccount(options.privateKey);
   const payer = new x402Client().register(network, new ExactEvmScheme(account));
   const chain = createPublicClient({ chain: network === "eip155:84532" ? baseSepolia : base, transport: http(options.rpcUrl) });
@@ -112,7 +114,7 @@ export async function createBuyer(options: BuyerOptions) {
   async function sign(paymentRequired: PaymentRequired): Promise<{ payment: PaymentPayload; amount: bigint }> {
     const accept = paymentRequired.accepts.find(item => item.scheme === "exact" && item.network === network);
     if (!accept) throw new Error(`no ${network} option in the quote`);
-    if (USDC[network] && accept.asset.toLowerCase() !== USDC[network]) throw new Error(`quote asks for ${accept.asset}, only USDC is accepted`);
+    if (accept.asset.toLowerCase() !== usdc) throw new Error(`quote asks for ${accept.asset}, only USDC is accepted`);
     const amount = BigInt(accept.amount);
     if (amount > maxPerCall) throw new SpendCapError(`price ${accept.amount} is above the per-call cap`);
     if (accept.maxTimeoutSeconds > MAX_WINDOW_SECONDS) throw new Error(`quote asks for a ${accept.maxTimeoutSeconds}s payment window, the limit is ${MAX_WINDOW_SECONDS}s`);

@@ -20,8 +20,9 @@ export type DatasetRow = {
 const columns: (keyof DatasetRow)[] = ["time", "topic", "value", "unit", "reading_time", "price_usd", "network", "tx", "payer", "buyer", "latency_ms"];
 
 function csvCell(value: unknown): string {
-  const text = value === undefined ? "" : String(value);
-  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  let text = value === undefined ? "" : String(value);
+  if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
 export function exportDataset(ledgerPath: string, outDir: string, testBuyers: string[]): { rows: number; files: string[] } {

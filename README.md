@@ -83,10 +83,10 @@ Already running a broker? Set `"broker"` to it with the bridge's username and pa
 - **Charged only for delivered data.** Settlement happens after the reading is in hand and before it's sent. Uncertain settlements are checked onchain, and count only if the exact USDC transfer to your payout is there.
 - **Idempotent payments.** Replays, duplicates and concurrent reuse of one payment are refused. MQTT redelivery never double-charges.
 - **Private data stays private.** Raw readings and other buyers' replies are blocked at the broker, and the built-in broker only accepts requests that reply to the sender itself.
-- **Floods stay cheap.** Forged and unfunded payments are refused before they reach the facilitator, and paid requests are limited per paying wallet, so a flood can't lock out buyers who already paid.
+- **Floods stay cheap.** Forged and unfunded payments are refused before they reach the facilitator. A wallet only earns a higher limit after it pays, and new buyers can't be locked out by a flood of fake IDs.
 - **Buyers have caps,** per call and in total, held even when buys run in parallel. A payment counts as spent until it expires unused on-chain, whatever the seller replies, and the same payment is resent instead of signing a new one.
-- **TLS for remote brokers.** The buyer refuses plain `mqtt://` or `ws://` to anything but localhost unless you pass `--allow-cleartext`.
-- **USDC only.** The buyer signs only for USDC, so its caps always mean dollars, and it rejects malformed readings.
+- **TLS for remote brokers.** The buyer and the seller refuse plain `mqtt://` or `ws://` to anything but localhost unless you pass `--allow-cleartext`.
+- **USDC only.** The buyer signs only for USDC on Base or Base Sepolia, so its caps always mean dollars, and it rejects malformed readings.
 
 ## datasets
 

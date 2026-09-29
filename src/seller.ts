@@ -22,6 +22,7 @@ export type SellerOptions = {
   quotesPerMinute?: number;
   paymentsPerMinute?: number;
   payerPerMinute?: number;
+  facilitatorPerMinute?: number;
   maxRequesters?: number;
 };
 
@@ -66,6 +67,8 @@ export class Seller extends EventEmitter {
   private trusted = new Map<string, number>();
   private quotes: Bucket = { tokens: 0, at: 0 };
   private unknownPayers: Bucket = { tokens: 0, at: 0 };
+  private facilitatorCalls: Bucket = { tokens: 0, at: 0 };
+  private admissions: Bucket = { tokens: 0, at: 0 };
   private quoteCache = new Map<string, PaymentRequired>();
   private chain;
 
@@ -169,9 +172,9 @@ export class Seller extends EventEmitter {
           this.record({ ...base, state: "rejected", error: "insufficient balance" });
           return reply(400, { error: "insufficient balance" });
         }
-        this.trust(payer);
       }
 
+      if (!this.take(this.facilitatorCalls, this.options.facilitatorPerMinute ?? 600)) return reply(429, { error: "too many requests, not charged" });
       let verified;
       try {
         verified = await this.server.verifyPayment(payment, matched);
@@ -192,12 +195,12 @@ export class Seller extends EventEmitter {
         return reply(503, { error: "device offline, not charged" });
       }
 
-      this.options.ledger.append({ ...base, state: "verified", reading, payTo: matched.payTo });
+      this.options.ledger.append({ ...base, state: "verified", reading, payTo: matched.payTo, asset: matched.asset });
       let settlement: SettleResponse | undefined;
       try {
         settlement = await this.server.settlePayment(payment, matched);
       } catch {
-        settlement = await this.settledOnChain(authorization, { payTo: matched.payTo, amount: matched.amount });
+        settlement = await this.settledOnChain(authorization, { payTo: matched.payTo, amount: matched.amount, asset: matched.asset });
       }
       if (!settlement?.success) {
         this.record({ ...base, state: "failed", error: "settlement failed, not charged" });
@@ -229,21 +232,21 @@ export class Seller extends EventEmitter {
   }
 
   private allow(replyTo: string): boolean {
-    return this.limit(this.buckets, replyTo.split("/")[3] ?? replyTo, this.options.rateLimitPerMinute ?? 60);
+    const max = this.options.maxRequesters ?? 10_000;
+    return this.limit(this.buckets, replyTo.split("/")[3] ?? replyTo, this.options.rateLimitPerMinute ?? 60, () => this.take(this.admissions, max));
   }
 
-  private limit(buckets: Map<string, Bucket>, id: string, limit: number): boolean {
+  private limit(buckets: Map<string, Bucket>, id: string, limit: number, admit?: () => boolean): boolean {
     const max = this.options.maxRequesters ?? 10_000;
     const now = Date.now();
     let bucket = buckets.get(id);
-    if (!bucket) {
-      if (buckets.size >= max) {
-        for (const [key, idle] of buckets) if (now - idle.at >= 60_000) buckets.delete(key);
-      }
-      if (buckets.size >= max) return false;
+    if (bucket) buckets.delete(id);
+    else {
+      if (admit && !admit()) return false;
+      if (buckets.size >= max) buckets.delete(buckets.keys().next().value as string);
       bucket = { tokens: limit, at: now };
-      buckets.set(id, bucket);
     }
+    buckets.set(id, bucket);
     return this.take(bucket, limit, now);
   }
 
@@ -269,9 +272,8 @@ export class Seller extends EventEmitter {
     return true;
   }
 
-  private async settledOnChain(authorization: Pick<Authorization, "from" | "nonce">, expected: { payTo: string; amount: string }): Promise<SettleResponse | undefined> {
-    const accepts = [...this.requirements.values()][0];
-    const asset = accepts?.[0]?.asset as Address | undefined;
+  private async settledOnChain(authorization: Pick<Authorization, "from" | "nonce">, expected: { payTo: string; amount: string; asset: string | undefined }): Promise<SettleResponse | undefined> {
+    const asset = expected.asset as Address | undefined;
     if (!asset) return undefined;
     try {
       const used = await this.chain.readContract({ address: asset, abi: usdcAbi, functionName: "authorizationState", args: [authorization.from, authorization.nonce] });
@@ -301,8 +303,10 @@ export class Seller extends EventEmitter {
   private async recover(): Promise<void> {
     for (const entry of this.options.ledger.pending()) {
       if (!entry.key || !entry.payer) continue;
+      if (entry.network && entry.network !== this.options.network) continue;
       const nonce = entry.key.split(":").at(-1) as Hex;
-      const settlement = await this.settledOnChain({ from: entry.payer as Address, nonce }, { payTo: entry.payTo ?? this.options.payTo, amount: entry.amount ?? "0" });
+      const asset = entry.asset ?? this.requirements.get(entry.topic)?.[0]?.asset;
+      const settlement = await this.settledOnChain({ from: entry.payer as Address, nonce }, { payTo: entry.payTo ?? this.options.payTo, amount: entry.amount ?? "0", asset });
       if (settlement?.success) {
         this.record({ id: entry.id, topic: entry.topic, key: entry.key, payer: entry.payer, amount: entry.amount, network: entry.network, state: "recovered", tx: settlement.transaction, reading: entry.reading, settlement });
       }

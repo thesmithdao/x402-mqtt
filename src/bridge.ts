@@ -11,7 +11,7 @@ export type Bridge = {
 };
 
 export async function connectBridge(options: { url: string; username?: string; password?: string; allowCleartext?: boolean }): Promise<{ client: MqttClient; latest: Map<string, Reading> }> {
-  if (options.username || options.password) requireTls(options.url, "broker credentials", options.allowCleartext);
+  requireTls(options.url, "payments and readings", options.allowCleartext);
   const client = await mqtt.connectAsync(options.url, {
     clientId: `x402-bridge-${randomBytes(4).toString("hex")}`,
     username: options.username,

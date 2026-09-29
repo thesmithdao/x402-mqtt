@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import net from "node:net";
 import { Aedes, type Client } from "aedes";
-import { CATALOG_TOPIC, REQUEST_PREFIX, RESPONSE_PREFIX } from "./spec.js";
+import { CATALOG_TOPIC, MAX_MESSAGE_BYTES, REQUEST_PREFIX, RESPONSE_PREFIX } from "./spec.js";
 
 export type BuiltInBroker = { url: string; username: string; password: string; close: () => Promise<void> };
 
 type Role = "bridge" | "buyer";
 
 function repliesToSelf(clientId: string, payload: Buffer | string): boolean {
+  if (Buffer.byteLength(payload) > MAX_MESSAGE_BYTES) return false;
   try {
     const replyTo = (JSON.parse(payload.toString()) as { replyTo?: unknown }).replyTo;
     return typeof replyTo === "string" && replyTo.startsWith(`${RESPONSE_PREFIX}${clientId}/`);

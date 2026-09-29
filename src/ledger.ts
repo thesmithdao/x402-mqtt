@@ -12,6 +12,7 @@ export type LedgerEntry = {
   key?: string;
   payer?: string;
   payTo?: string;
+  asset?: string;
   amount?: string;
   network?: string;
   tx?: string;
