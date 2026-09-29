@@ -10,7 +10,7 @@ The first real use case is a [MacBook selling](EVIDENCE.md) its own sensor readi
 
 ## Try it live
 
-Two machines in Germany sell their own readings at [cultos.dev/machines](https://www.cultos.dev/machines). Buy one for $0.001 with a wallet holding a little USDC on Base:
+Three machines sell their own readings at [cultos.dev/machines](https://www.cultos.dev/machines): two in Germany and an Android phone in Brazil. Buy one for $0.001 with a wallet holding a little USDC on Base:
 
 ```bash
 X402_MQTT_BUYER_KEY=0x… npx @cultos/x402-mqtt buy machine01/uptime --broker wss://machines.cultos.dev/mqtt
