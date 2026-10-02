@@ -14,7 +14,7 @@ import { toClientSvmSigner } from "@x402/svm";
 import { createKeyPairSignerFromPrivateKeyBytes, getBase58Decoder, getBase64EncodedWireTransaction, getCompiledTransactionMessageDecoder, getCompiledTransactionMessageEncoder } from "@solana/kit";
 import { Ledger, Seller, SpendCapError, PurchasePendingError, PurchaseExpiredError, createBuyer, startBuiltInBroker, connectBridge, startBridge, exportDataset } from "../dist/index.js";
 import { PurchaseStore, brokerIdentity, publicBrokerUrl } from "../dist/recovery.js";
-import { SOLANA_NETWORK, SOLANA_USDC, SolanaChain, decodeSolana, inspectSolana, tokenAccount } from "../dist/solana.js";
+import { SOLANA_NETWORK, SOLANA_USDC, SolanaChain, SolanaRpcUnavailableError, decodeSolana, inspectSolana, tokenAccount } from "../dist/solana.js";
 import { explorerUrl, walletIdentity } from "../dist/networks.js";
 import { loadConfig } from "../dist/config.js";
 
@@ -310,6 +310,20 @@ test("optional Solana authentication and cluster mismatches still refuse startup
   await assert.rejects(f.makeSeller().start(), /Solana RPC unavailable/);
   assert.equal(f.state.verify, 0);
   assert.equal(f.state.settle, 0);
+});
+
+test("a stalled Solana response body is a bounded transient failure", async t => {
+  let bodyStarted = false;
+  const server = createServer((_request, response) => {
+    bodyStarted = true;
+    response.setHeader("content-type", "application/json");
+    response.write('{"jsonrpc":"2.0","id":1,"result":"');
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const chain = new SolanaChain(`http://127.0.0.1:${server.address().port}`);
+  await assert.rejects(chain.call("getGenesisHash", [], Date.now() + 250), SolanaRpcUnavailableError);
+  assert.equal(bodyStarted, true);
 });
 
 test("optional Solana connection loss keeps Base available", async t => {
