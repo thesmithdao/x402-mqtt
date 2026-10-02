@@ -2,6 +2,7 @@ import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeFileSync
 import type { SettleResponse } from "@x402/core/types";
 import type { Reading } from "./spec.js";
 import type { SolanaProof } from "./solana.js";
+import { walletIdentity } from "./networks.js";
 
 export type LedgerState = "verified" | "pending" | "settled" | "recovered" | "rejected" | "refused" | "failed";
 
@@ -69,7 +70,7 @@ export class Ledger {
   }
 
   forRequest(id: string, topic: string, network: string, payer: string): LedgerEntry | undefined {
-    return [...this.latest.values()].find(entry => entry.id === id && entry.topic === topic && entry.network === network && entry.payer === payer && ["verified", "pending", "settled", "recovered"].includes(entry.state));
+    return [...this.latest.values()].find(entry => entry.id === id && entry.topic === topic && entry.network === network && !!entry.payer && walletIdentity(network, entry.payer) === walletIdentity(network, payer) && ["verified", "pending", "settled", "recovered"].includes(entry.state));
   }
 
   all(): LedgerEntry[] {

@@ -10,7 +10,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/client";
 import mqtt from "mqtt";
 import { encodeAbiParameters, encodeEventTopics, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { Ledger, Seller, SpendCapError, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
+import { Ledger, Seller, SpendCapError, PurchasePendingError, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
 import { startPage } from "../dist/page.js";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -235,6 +235,68 @@ test("a real transfer to the payout for the exact amount still counts", async ()
   });
   assert.equal(handled.reply.status, 200);
   assert.equal(handled.reply["x402/payment-response"].transaction, TX);
+});
+
+test("Base resume signs the same authorization and preserves its original spending cap", async t => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  const seen = [];
+  let pending = true;
+  const seller = await fakeSeller(broker, request => {
+    seen.push(request);
+    return pending ? { id: request.id, status: 503, error: "payment pending" } : { id: request.id, status: 200, result: { value: 42, ts: Date.now() }, "x402/payment-response": { success: true, transaction: TX, network: "eip155:8453", payer: request["x402/payment"].payload.authorization.from } };
+  });
+  const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001" });
+  t.after(async () => { await buyer.close(); await seller.endAsync(); await broker.close(); });
+  let error;
+  try { await buyer.buy("t"); } catch (value) { error = value; }
+  assert.ok(error instanceof PurchasePendingError);
+  assert.ok(!JSON.stringify(error.request).includes('"signature"'));
+  pending = false;
+  assert.equal((await buyer.resume(error.request)).reading.value, 42);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1].id, seen[0].id);
+  assert.equal(seen[1]["x402/payment"].payload.authorization.nonce, seen[0]["x402/payment"].payload.authorization.nonce);
+  assert.ok(seen[1]["x402/payment"].payload.signature === seen[0]["x402/payment"].payload.signature);
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+});
+
+test("Base saved replies survive expired authorization without settling fresh expired payments", async t => {
+  const rpc = await fakeRpc({ balance: 10n ** 12n });
+  const privateKey = key();
+  const wallet = privateKeyToAccount(privateKey);
+  const counter = { verify: 0 };
+  const seller = makeSeller(counter, rpc, { facilitator: payingFacilitator(counter) });
+  await seller.start();
+  t.after(() => rpc.close());
+  const payment = await signed(seller, privateKey);
+  const original = await seller.handle("t", Buffer.from(JSON.stringify({ id: "original", replyTo: "x402/v1/res/test/original", "x402/payment": payment })));
+  assert.equal(original.reply.status, 200);
+  const authorization = { ...payment.payload.authorization, validAfter: "1", validBefore: "2" };
+  const signature = await wallet.signTypedData({ domain: { name: "USD Coin", version: "2", chainId: 8453, verifyingContract: USDC }, types: { TransferWithAuthorization: [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "validAfter", type: "uint256" }, { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" }] }, primaryType: "TransferWithAuthorization", message: { ...authorization, value: BigInt(authorization.value), validAfter: 1n, validBefore: 2n } });
+  const expired = { ...payment, payload: { authorization, signature } };
+  const replay = await seller.handle("t", Buffer.from(JSON.stringify({ id: "original", replyTo: "x402/v1/res/test/original", "x402/payment": expired })));
+  assert.equal(replay.reply.status, 200);
+  assert.deepEqual(replay.reply.result, original.reply.result);
+  assert.equal(counter.verify, 1);
+  const fresh = await signed(seller, privateKey);
+  fresh.payload.authorization.validBefore = "2";
+  assert.equal((await ask(seller, fresh)).reply.status, 400);
+});
+
+test("Base address casing cannot buy twice under the original request ID", async t => {
+  const rpc = await fakeRpc({ balance: 10n ** 12n });
+  const privateKey = key();
+  const counter = { verify: 0 };
+  const seller = makeSeller(counter, rpc, { facilitator: payingFacilitator(counter) });
+  await seller.start();
+  t.after(() => rpc.close());
+  const first = await signed(seller, privateKey);
+  const request = payment => seller.handle("t", Buffer.from(JSON.stringify({ id: "original", replyTo: "x402/v1/res/test/original", "x402/payment": payment })));
+  assert.equal((await request(first)).reply.status, 200);
+  const replacement = await signed(seller, privateKey);
+  replacement.payload.authorization.from = replacement.payload.authorization.from.toLowerCase();
+  assert.equal((await request(replacement)).reply.status, 409);
+  assert.equal(counter.verify, 1);
 });
 
 test("the seller never talks cleartext to a remote broker", async () => {

@@ -1,6 +1,7 @@
 export * from "./spec.js";
 export { Seller, type SellerOptions } from "./seller.js";
-export { createBuyer, SpendCapError, type BuyerOptions, type Purchase } from "./buyer.js";
+export { createBuyer, SpendCapError, PurchasePendingError, PurchaseExpiredError, type BuyerOptions, type Purchase } from "./buyer.js";
+export type { PurchaseRequest } from "./recovery.js";
 export { startBuiltInBroker, type BuiltInBroker } from "./broker.js";
 export { connectBridge, startBridge, type Bridge } from "./bridge.js";
 export { Ledger, type LedgerEntry, type LedgerState } from "./ledger.js";

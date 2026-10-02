@@ -5,11 +5,15 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readdirSync, statSync, symlinkSync, chmodSync } from "node:fs";
 import { x402Client } from "@x402/core/client";
 import { ExactSvmScheme } from "@x402/svm/exact/client";
 import { toClientSvmSigner } from "@x402/svm";
 import { createKeyPairSignerFromPrivateKeyBytes, getBase58Decoder, getBase64EncodedWireTransaction, getCompiledTransactionMessageDecoder, getCompiledTransactionMessageEncoder } from "@solana/kit";
-import { Ledger, Seller, SpendCapError, createBuyer, startBuiltInBroker, connectBridge, startBridge, exportDataset } from "../dist/index.js";
+import { Ledger, Seller, SpendCapError, PurchasePendingError, PurchaseExpiredError, createBuyer, startBuiltInBroker, connectBridge, startBridge, exportDataset } from "../dist/index.js";
+import { PurchaseStore, brokerIdentity, publicBrokerUrl } from "../dist/recovery.js";
 import { SOLANA_NETWORK, SOLANA_USDC, SolanaChain, decodeSolana, inspectSolana, tokenAccount } from "../dist/solana.js";
 import { explorerUrl, walletIdentity } from "../dist/networks.js";
 import { loadConfig } from "../dist/config.js";
@@ -32,10 +36,11 @@ async function fixture(t, options = {}) {
     let result;
     if (call.method === "getGenesisHash") result = state.wrongCluster ? recipient.address : SOLANA_NETWORK.slice(7);
     else if (call.method === "getSlot") result = 1000;
+    else if (call.method === "getBlockHeight") result = state.finalizedHeight ?? 1400;
     else if (call.method === "getAccountInfo") result = { context: { slot: 1000 }, value: { data: [mint.toString("base64"), "base64"], executable: false, lamports: 1461600, owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", rentEpoch: 0, space: 82 } };
-    else if (call.method === "getLatestBlockhash") result = { context: { slot: 1000 }, value: { blockhash: recipient.address, lastValidBlockHeight: 1200 } };
+    else if (call.method === "getLatestBlockhash") result = { context: { slot: 1000 }, value: { blockhash: state.blockhash ?? recipient.address, lastValidBlockHeight: 1200 } };
     else if (call.method === "getTokenAccountBalance") result = { context: { slot: 1000 }, value: { amount: state.funded ? "1000000" : "0", decimals: 6, uiAmount: state.funded ? 1 : 0, uiAmountString: state.funded ? "1" : "0" } };
-    else if (call.method === "isBlockhashValid") result = { context: { slot: 1400 }, value: state.valid };
+    else if (call.method === "isBlockhashValid") result = { context: { slot: 1400 }, value: state.valid || (state.blockhash !== undefined && call.params[0] === state.blockhash) };
     else if (call.method === "minimumLedgerSlot") result = state.firstSlot ?? 0;
     else if (call.method === "getTransaction") result = state.txs.get(call.params[0]) ?? null;
     else if (call.method === "getSignaturesForAddress") result = state.rows;
@@ -145,7 +150,7 @@ test("Solana pending signature is reconciled but failed or unrelated transaction
   assert.equal((await f.ask(await f.sign(), "failed")).status, 503);
   const chain = new SolanaChain(f.rpc);
   const payment = await f.sign();
-  const proof = { ...await inspectSolana(payment, payment.accepted), slot: 800 };
+  const proof = { ...await inspectSolana(payment, payment.accepted), slot: 800, lastValidBlockHeight: 1200 };
   assert.equal((await chain.reconcile(proof, f.payer.address)).settlement, undefined);
 });
 
@@ -209,7 +214,7 @@ test("a Base seller advertises optional Solana without changing its Base quote",
 test("Solana expiry cannot release spending without complete finalized history", async t => {
   const f = await fixture(t);
   const payment = await f.sign();
-  const proof = { ...await inspectSolana(payment, payment.accepted), slot: 800 };
+  const proof = { ...await inspectSolana(payment, payment.accepted), slot: 800, lastValidBlockHeight: 1200 };
   const chain = new SolanaChain(f.rpc);
   assert.equal(await chain.expiredUnused(proof, f.payer.address), false);
   f.state.valid = false;
@@ -238,6 +243,20 @@ test("Solana casing, explorer mapping and test exclusions remain network-specifi
   assert.equal(JSON.parse(readFileSync(join(out, "x402-mqtt-sales.jsonl"), "utf8")).buyer, "cult-os-test");
 });
 
+test("a blockhash absent from finalized state is not proof of unused expiry", async t => {
+  const f = await fixture(t, { valid: false, finalizedHeight: 1000 });
+  const payment = await f.sign();
+  const proof = { ...await inspectSolana(payment, payment.accepted), slot: 800, lastValidBlockHeight: 1200 };
+  const chain = new SolanaChain(f.rpc);
+  assert.equal(await chain.expiredUnused(proof, f.payer.address), false);
+  f.state.finalizedHeight = 1200;
+  assert.equal(await chain.expiredUnused(proof, f.payer.address), false);
+  f.state.finalizedHeight = 1201;
+  assert.equal(await chain.expiredUnused(proof, f.payer.address), true);
+  delete proof.lastValidBlockHeight;
+  assert.equal(await chain.expiredUnused(proof, f.payer.address), false);
+});
+
 test("Solana config is explicit and corrupt ledgers refuse startup", async t => {
   const f = await fixture(t);
   assert.equal(loadConfig("/nonexistent", { network: SOLANA_NETWORK, payout: f.recipient.address }).payout, f.recipient.address);
@@ -250,6 +269,7 @@ test("Solana config is explicit and corrupt ledgers refuse startup", async t => 
 
 async function localBuyer(t, f, overrides = {}) {
   const broker = await startBuiltInBroker({ port: 0 });
+  f.buyerUrl = broker.url;
   const connection = await connectBridge({ url: broker.url, username: broker.username, password: broker.password });
   const bridge = await startBridge(connection.client, connection.latest, f.seller);
   const buyer = await createBuyer({ url: broker.url, privateKey: f.key, network: SOLANA_NETWORK, rpcUrl: f.rpc, maxPerCall: "0.001", maxTotal: "0.003", ...overrides });
@@ -276,6 +296,7 @@ test("Solana buyer holds pending spending and reclaims only expired unused payme
   f.state.historyDown = true;
   await assert.rejects(buyer.buy("sensor"), SpendCapError);
   f.state.historyDown = false;
+  f.state.blockhash = f.fee.address;
   await assert.rejects(buyer.buy("sensor"), /pending/);
   assert.equal(f.state.settle, 2);
 });
@@ -288,6 +309,20 @@ test("Solana buyer refuses a receipt for another transfer even when its own paym
   await assert.rejects(buyer.buy("sensor"), /receipt not confirmed/);
   await assert.rejects(buyer.buy("sensor"), SpendCapError);
   assert.equal(f.state.settle, 1);
+});
+
+test("an expired reservation cannot be restored for free beside a new pending purchase", async t => {
+  const f = await fixture(t, { refuse: true });
+  let saved;
+  const buyer = await localBuyer(t, f, { maxTotal: "0.001", onPrepared: value => { saved = value; } });
+  await assert.rejects(buyer.buy("sensor"), PurchasePendingError);
+  const expired = structuredClone(saved);
+  f.state.valid = false;
+  f.state.blockhash = f.fee.address;
+  await assert.rejects(buyer.buy("sensor"), PurchasePendingError);
+  await assert.rejects(buyer.resume(expired), SpendCapError);
+  await assert.rejects(buyer.buy("sensor"), SpendCapError);
+  assert.equal(f.state.settle, 2);
 });
 
 test("Solana buyer refuses malformed prices, mints and fee payers before signing", async t => {
@@ -344,4 +379,168 @@ test("Solana recovery stops at its history bound and does not release spending",
   f.state.valid = false;
   assert.equal((await new SolanaChain(f.rpc).reconcile(proof, f.payer.address)).complete, false);
   assert.equal(await new SolanaChain(f.rpc).expiredUnused(proof, f.payer.address), false);
+});
+
+test("Solana buy exposes unsigned recovery data and resumes once within the original cap", async t => {
+  const f = await fixture(t, { drop: true, historyDown: true });
+  let saved;
+  const buyer = await localBuyer(t, f, { maxTotal: "0.001", onPrepared: value => { saved = value; } });
+  let pending;
+  try { await buyer.buy("sensor"); } catch (error) { pending = error; }
+  assert.ok(pending instanceof PurchasePendingError);
+  assert.equal(pending.request.id, saved.id);
+  assert.ok(!JSON.stringify(saved).includes(f.key));
+  assert.ok(!JSON.stringify(saved).includes('"signature"'));
+  assert.ok(!JSON.stringify(saved).includes('"transaction"'));
+  await assert.rejects(buyer.buy("sensor"), SpendCapError);
+  f.state.historyDown = false;
+  const results = await Promise.allSettled([buyer.resume(pending.request), buyer.resume(pending.request)]);
+  assert.equal(results.filter(row => row.status === "fulfilled").length, 1);
+  assert.match(results.find(row => row.status === "rejected").reason.message, /already in progress/);
+  const recovered = results.find(row => row.status === "fulfilled").value;
+  assert.equal(recovered.reading.value, 42);
+  assert.equal((await buyer.resume(saved)).settlement.transaction, recovered.settlement.transaction);
+  assert.equal(f.state.verify, 1);
+  assert.equal(f.state.settle, 1);
+});
+
+test("Solana recovery rejects tampered records and wrong wallets before sending", async t => {
+  const f = await fixture(t, { refuse: true });
+  let saved;
+  const buyer = await localBuyer(t, f, { onPrepared: value => { saved = value; } });
+  await assert.rejects(buyer.buy("sensor"), PurchasePendingError);
+  const verifies = f.state.verify;
+  for (const mutation of [
+    value => { value.broker = "0".repeat(64); },
+    value => { value.payer = f.recipient.address; },
+    value => { value.id = "../request"; },
+    value => { value.accepted.network = "eip155:8453"; },
+    value => { value.accepted.amount = "999"; },
+    value => { value.accepted.asset = f.recipient.address; },
+    value => { value.solana.message = "bad"; },
+    value => { value.solana.lastValidBlockHeight = -1; },
+    value => { value.solana.lastValidBlockHeight = "1200"; },
+    value => { value.signature = "unexpected"; },
+    value => { value.solana.signature = "unexpected"; },
+  ]) {
+    const bad = structuredClone(saved);
+    mutation(bad);
+    await assert.rejects(buyer.resume(bad));
+  }
+  assert.equal(f.state.verify, verifies);
+  assert.equal(f.state.settle, 1);
+});
+
+test("Solana resume declares unused expiry only with complete finalized evidence", async t => {
+  const f = await fixture(t, { refuse: true });
+  let saved;
+  const buyer = await localBuyer(t, f, { maxTotal: "0.001", onPrepared: value => { saved = value; } });
+  await assert.rejects(buyer.buy("sensor"), PurchasePendingError);
+  f.state.valid = false;
+  f.state.historyDown = true;
+  await assert.rejects(buyer.resume(saved), error => error instanceof PurchasePendingError && !(error instanceof PurchaseExpiredError));
+  f.state.historyDown = false;
+  await assert.rejects(buyer.resume(saved), PurchaseExpiredError);
+  assert.equal(f.state.settle, 1);
+});
+
+test("a purchase checkpoint failure stops before any payment reaches the seller", async t => {
+  const f = await fixture(t);
+  const buyer = await localBuyer(t, f, { onPrepared: () => { throw new Error("disk full"); } });
+  await assert.rejects(buyer.buy("sensor"), /disk full/);
+  assert.equal(f.state.verify, 0);
+  assert.equal(f.state.settle, 0);
+});
+
+test("the CLI resumes its original Solana purchase after process and seller restart", async t => {
+  const f = await fixture(t, { drop: true, historyDown: true });
+  const broker = await startBuiltInBroker({ port: 0 });
+  let connection = await connectBridge({ url: broker.url, username: broker.username, password: broker.password });
+  let bridge = await startBridge(connection.client, connection.latest, f.seller);
+  t.after(async () => { await bridge.close(); await broker.close(); });
+  const cache = mkdtempSync(join(tmpdir(), "mqtt-cli-recovery-"));
+  const env = { ...process.env, X402_MQTT_BUYER_KEY: f.key, XDG_CACHE_HOME: cache };
+  const args = ["dist/cli.js", "buy", "sensor", "--network", "solana", "--broker", broker.url, "--rpc", f.rpc, "--max", "0.001"];
+  const run = promisify(execFile);
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15000 }), error => /payment pending/.test(error.stderr));
+  const directory = join(cache, "x402-mqtt");
+  const files = readdirSync(directory);
+  assert.equal(files.length, 1);
+  assert.equal(statSync(join(directory, files[0])).mode & 0o777, 0o600);
+  const record = JSON.parse(readFileSync(join(directory, files[0]), "utf8"));
+  assert.ok(record.solana.message);
+  assert.ok(!JSON.stringify(record).includes(f.key));
+  await bridge.close();
+  f.state.historyDown = false;
+  f.supported.kinds[0].extra.feePayer = f.recipient.address;
+  const restarted = f.makeSeller({ readings: () => undefined });
+  await restarted.start();
+  connection = await connectBridge({ url: broker.url, username: broker.username, password: broker.password });
+  bridge = await startBridge(connection.client, connection.latest, restarted);
+  const result = await run(process.execPath, args, { env, timeout: 15000 });
+  assert.match(result.stdout, /paid \$0\.001/);
+  assert.match(result.stdout, /42/);
+  assert.equal(readdirSync(directory).length, 0);
+  assert.equal(f.state.verify, 1);
+  assert.equal(f.state.settle, 1);
+});
+
+test("purchase files reject corruption, symlinks and public permissions without overwriting", async t => {
+  const f = await fixture(t, { refuse: true });
+  let saved;
+  const buyer = await localBuyer(t, f, { onPrepared: value => { saved = value; } });
+  await assert.rejects(buyer.buy("sensor"), PurchasePendingError);
+  const directory = mkdtempSync(join(tmpdir(), "mqtt-store-test-"));
+  const store = new PurchaseStore(directory, f.buyerUrl, SOLANA_NETWORK, f.payer.address, "sensor");
+  store.save(saved);
+  assert.deepEqual(store.load(), saved);
+  assert.throws(() => store.save(saved));
+  const path = join(directory, readdirSync(directory)[0]);
+  chmodSync(path, 0o644);
+  assert.throws(() => store.load());
+  chmodSync(path, 0o600);
+  writeFileSync(path, '{"partial":');
+  assert.throws(() => store.load());
+  store.remove(saved);
+  const target = join(tmpdir(), `mqtt-store-target-${randomBytes(6).toString("hex")}`);
+  writeFileSync(target, JSON.stringify(saved), { mode: 0o600 });
+  symlinkSync(target, path);
+  assert.throws(() => store.load());
+  assert.ok(readFileSync(target, "utf8"));
+});
+
+test("the CLI retains recovery until finalized height passes the original expiry", async t => {
+  const f = await fixture(t, { refuse: true, valid: false, finalizedHeight: 1000 });
+  const broker = await startBuiltInBroker({ port: 0 });
+  const connection = await connectBridge({ url: broker.url, username: broker.username, password: broker.password });
+  const bridge = await startBridge(connection.client, connection.latest, f.seller);
+  t.after(async () => { await bridge.close(); await broker.close(); });
+  const cache = mkdtempSync(join(tmpdir(), "mqtt-cli-expiry-"));
+  const env = { ...process.env, X402_MQTT_BUYER_KEY: f.key, XDG_CACHE_HOME: cache };
+  const args = ["dist/cli.js", "buy", "sensor", "--network", "solana", "--broker", broker.url, "--rpc", f.rpc, "--max", "0.001"];
+  const run = promisify(execFile);
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15000 }), error => /payment pending/.test(error.stderr));
+  const directory = join(cache, "x402-mqtt");
+  assert.equal(readdirSync(directory).length, 1);
+  f.state.finalizedHeight = 1200;
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15000 }), error => /payment pending/.test(error.stderr));
+  assert.equal(readdirSync(directory).length, 1);
+  f.state.finalizedHeight = 1201;
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15000 }), error => /expired unused/.test(error.stderr));
+  assert.equal(readdirSync(directory).length, 0);
+  assert.equal(f.state.settle, 1);
+});
+
+test("broker credentials never enter quotes or purchase identity and rotation preserves recovery", async t => {
+  const before = "mqtts://fixture-user:fixture-password@broker.example.com:8883/mqtt?token=fixture-token";
+  const after = "mqtts://fixture-other:fixture-replacement@broker.example.com:8883/mqtt?token=fixture-new";
+  assert.equal(publicBrokerUrl(before), "mqtts://broker.example.com:8883/mqtt");
+  assert.equal(brokerIdentity(before), brokerIdentity(after));
+  const f = await fixture(t);
+  const seller = f.makeSeller({ resourceBase: before });
+  await seller.start();
+  const reply = await seller.handle("sensor", Buffer.from(JSON.stringify({ id: "quote", replyTo: "x402/v1/res/test/quote" })));
+  assert.equal(reply.reply.paymentRequired.resource.url, "mqtts://broker.example.com:8883/mqtt/sensor");
+  assert.ok(!JSON.stringify(reply).includes("fixture-password"));
+  assert.ok(!JSON.stringify(reply).includes("fixture-token"));
 });

@@ -1,6 +1,6 @@
 import type { PaymentPayload, PaymentRequirements, SettleResponse } from "@x402/core/types";
 import { SOLANA_MAINNET_CAIP2, USDC_MAINNET_ADDRESS, transactionMessageHash, validateSvmAddress } from "@x402/svm";
-import { address, createKeyPairSignerFromBytes, decompileTransactionMessage, getAddressEncoder, getBase58Decoder, getBase58Encoder, getBase64Encoder, getCompiledTransactionMessageDecoder, getProgramDerivedAddress, getTransactionDecoder, verifySignature } from "@solana/kit";
+import { address, createKeyPairSignerFromBytes, decompileTransactionMessage, getAddressEncoder, getBase58Decoder, getBase58Encoder, getBase64Encoder, getBase64EncodedWireTransaction, getCompiledTransactionMessageDecoder, getProgramDerivedAddress, getTransactionDecoder, verifySignature } from "@solana/kit";
 
 export const SOLANA_NETWORK = SOLANA_MAINNET_CAIP2;
 export const SOLANA_USDC = USDC_MAINNET_ADDRESS;
@@ -9,7 +9,7 @@ const ATA = address("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 const COMPUTE = "ComputeBudget111111111111111111111111111111";
 const MEMO = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
-export type SolanaProof = { messageHash: string; source: string; destination: string; blockhash: string; slot: number };
+export type SolanaProof = { messageHash: string; source: string; destination: string; blockhash: string; slot: number; lastValidBlockHeight?: number };
 export type SolanaPayment = SolanaProof & { payer: string; amount: string };
 type ChainTransaction = { transaction: [string, string]; meta: { err: unknown } | null; slot: number };
 type SignatureRow = { signature: string; slot: number; err: unknown };
@@ -44,8 +44,26 @@ export function solanaIdentity(payment: PaymentPayload) {
 }
 
 export async function inspectSolana(payment: PaymentPayload, requirements: PaymentRequirements): Promise<SolanaPayment> {
-  if (payment.x402Version !== 2 || requirements.network !== SOLANA_NETWORK || requirements.asset !== SOLANA_USDC) throw new Error("unsupported Solana payment");
+  if (payment.x402Version !== 2) throw new Error("unsupported Solana payment");
   const transaction = decodeSolana((payment.payload as { transaction: string }).transaction);
+  const proof = await inspectSolanaMessage(transaction, requirements);
+  const signature = transaction.signatures[address(proof.payer)];
+  if (!signature || !signature.some(byte => byte !== 0)) throw new Error("invalid payment signature");
+  const publicKey = await crypto.subtle.importKey("raw", Uint8Array.from(getAddressEncoder().encode(address(proof.payer))), "Ed25519", false, ["verify"]);
+  if (!await verifySignature(publicKey, signature, transaction.messageBytes)) throw new Error("invalid payment signature");
+  return proof;
+}
+
+export function unsignedSolana(message: string) {
+  if (typeof message !== "string" || message.length > 1800 || !/^[A-Za-z0-9+/]+={0,2}$/.test(message)) throw new Error("invalid Solana message");
+  const bytes = getBase64Encoder().encode(message);
+  const compiled = getCompiledTransactionMessageDecoder().decode(bytes);
+  if (compiled.header.numSignerAccounts !== 2) throw new Error("unsupported Solana transaction");
+  return decodeSolana(getBase64EncodedWireTransaction({ messageBytes: bytes as ReturnType<typeof decodeSolana>["messageBytes"], signatures: Object.fromEntries(compiled.staticAccounts.slice(0, 2).map(key => [key, null])) }));
+}
+
+export async function inspectSolanaMessage(transaction: ReturnType<typeof decodeSolana>, requirements: PaymentRequirements): Promise<SolanaPayment> {
+  if (requirements.network !== SOLANA_NETWORK || requirements.asset !== SOLANA_USDC) throw new Error("unsupported Solana payment");
   const compiled = getCompiledTransactionMessageDecoder().decode(transaction.messageBytes);
   if (compiled.header.numSignerAccounts !== 2 || ("addressTableLookups" in compiled && compiled.addressTableLookups?.length)) throw new Error("unsupported Solana transaction");
   const feePayer = compiled.staticAccounts[0];
@@ -64,10 +82,6 @@ export async function inspectSolana(payment: PaymentPayload, requirements: Payme
   const [expectedSource, expectedDestination] = await Promise.all([tokenAccount(payer), tokenAccount(requirements.payTo)]);
   const amount = data(transfer).getBigUint64(1, true).toString();
   if (source.address !== expectedSource || mint.address !== SOLANA_USDC || destination.address !== expectedDestination || authority.address !== payer || amount !== requirements.amount || source.address === destination.address) throw new Error("payment does not match the quote");
-  const signature = transaction.signatures[payer];
-  if (!signature || !signature.some(byte => byte !== 0)) throw new Error("invalid payment signature");
-  const publicKey = await crypto.subtle.importKey("raw", Uint8Array.from(getAddressEncoder().encode(payer)), "Ed25519", false, ["verify"]);
-  if (!await verifySignature(publicKey, signature, transaction.messageBytes)) throw new Error("invalid payment signature");
   return { payer, amount, source: expectedSource, destination: expectedDestination, blockhash: compiled.lifetimeToken, messageHash: transactionMessageHash(transaction), slot: 0 };
 }
 
@@ -112,6 +126,12 @@ export class SolanaChain {
     return Math.max(0, slot - 200);
   }
 
+  async latestBlockhash(): Promise<{ blockhash: string; lastValidBlockHeight: number; slot: number }> {
+    const result = await this.call<{ context: { slot: number }; value: { blockhash: string; lastValidBlockHeight: number } }>("getLatestBlockhash", [{ commitment: "finalized" }]);
+    if (!validateSvmAddress(result.value?.blockhash) || !Number.isSafeInteger(result.value.lastValidBlockHeight) || result.value.lastValidBlockHeight < 0 || !Number.isSafeInteger(result.context?.slot) || result.context.slot < 0) throw new Error("invalid Solana blockhash");
+    return { ...result.value, slot: Math.max(0, result.context.slot - 200) };
+  }
+
   async balance(source: string): Promise<bigint> {
     const result = await this.call<{ value: { amount: string; decimals: number } }>("getTokenAccountBalance", [source, { commitment: "confirmed" }]);
     if (result.value?.decimals !== 6 || !/^\d+$/.test(result.value.amount)) throw new Error("invalid USDC balance");
@@ -154,6 +174,9 @@ export class SolanaChain {
   }
 
   async expiredUnused(proof: SolanaProof, payer: string): Promise<boolean> {
+    if (!Number.isSafeInteger(proof.lastValidBlockHeight) || proof.lastValidBlockHeight! < 0) return false;
+    const height = await this.call<number>("getBlockHeight", [{ commitment: "finalized" }]);
+    if (!Number.isSafeInteger(height) || height <= proof.lastValidBlockHeight!) return false;
     const valid = await this.call<{ value: boolean }>("isBlockhashValid", [proof.blockhash, { commitment: "finalized" }]);
     if (valid.value !== false) return false;
     const firstSlot = await this.call<number>("minimumLedgerSlot");

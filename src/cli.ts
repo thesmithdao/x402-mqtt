@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { PurchaseStore, publicBrokerUrl, type PurchaseRequest } from "./recovery.js";
 import { SOLANA_NETWORK } from "./solana.js";
 import { explorerUrl, networkName } from "./networks.js";
 import { startBuiltInBroker, type BuiltInBroker } from "./broker.js";
 import { connectBridge, startBridge } from "./bridge.js";
-import { createBuyer } from "./buyer.js";
+import { createBuyer, PurchaseExpiredError, PurchasePendingError } from "./buyer.js";
 import { loadConfig } from "./config.js";
 import { exportDataset } from "./export.js";
 import { createFacilitator } from "./facilitator.js";
@@ -68,7 +71,7 @@ async function sell(values: Record<string, string | boolean | undefined>) {
     facilitator,
     ledger,
     readings: topic => latest.get(topic),
-    resourceBase: url.replace(/\/\/[^@/]*@/, "//"),
+    resourceBase: publicBrokerUrl(url),
     maxAgeMs: config.maxAgeSeconds * 1000,
     rpcUrl: config.rpcUrl,
     solanaPayout: config.solanaPayout,
@@ -79,7 +82,7 @@ async function sell(values: Record<string, string | boolean | undefined>) {
   const stopSource = config.source === "mac" ? startMacSource(bridge.publishReading) : undefined;
   const page = config.pagePort === false ? undefined : await startPage({ port: config.pagePort, seller, ledger, offers, latest, testBuyers: config.testBuyers });
 
-  console.log(`selling on ${url.replace(/\/\/[^@/]*@/, "//")} · payout ${config.payout} · ${networkName(config.network)}${config.solanaPayout ? " + Solana" : ""}`);
+  console.log(`selling on ${publicBrokerUrl(url)} · payout ${config.payout} · ${networkName(config.network)}${config.solanaPayout ? " + Solana" : ""}`);
   for (const offer of offers) console.log(`  ${offer.topic.padEnd(28)} $${offer.price}`);
   if (page) console.log(`sales page  http://127.0.0.1:${config.pagePort}`);
   seller.on("entry", entry => {
@@ -102,22 +105,34 @@ async function buy(topic: string | undefined, values: Record<string, string | bo
   if (!topic) throw new Error("usage: x402-mqtt buy <topic>");
   const key = process.env.X402_MQTT_BUYER_KEY?.trim();
   if (!key) throw new Error("set X402_MQTT_BUYER_KEY to a small-balance wallet key");
+  const url = (values.broker as string | undefined) ?? "mqtt://127.0.0.1:1883";
+  const network = selectedNetwork(values.network) ?? "eip155:8453";
+  let store: PurchaseStore;
+  let request: PurchaseRequest | undefined;
   const buyer = await createBuyer({
-    url: (values.broker as string | undefined) ?? "mqtt://127.0.0.1:1883",
-    network: selectedNetwork(values.network),
+    url,
+    network,
     rpcUrl: values.rpc as string | undefined,
     privateKey: selectedNetwork(values.network) === SOLANA_NETWORK ? key : (key.startsWith("0x") ? key : `0x${key}`),
     maxPerCall: (values.max as string | undefined) ?? "0.01",
     allowCleartext: values["allow-cleartext"] === true,
+    onPrepared: value => { store.save(value); request = value; },
   });
   try {
-    const purchase = await buyer.buy(topic);
+    store = new PurchaseStore(join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "x402-mqtt"), url, network, buyer.address, topic);
+    request = store.load();
+    const purchase = request ? await buyer.resume(request) : await buyer.buy(topic);
+    store.remove(request!);
     const clean = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
     const value = clean(`${purchase.reading.value}${purchase.reading.unit ? ` ${purchase.reading.unit}` : ""}`);
     const link = explorerUrl(purchase.settlement.network, purchase.settlement.transaction);
     const tx = link ? purchase.settlement.transaction : "unknown";
     console.log(`paid $${Number(purchase.amount) / 1e6} · ${value} · tx ${tx}`);
     if (link) console.log(link);
+  } catch (error) {
+    if (error instanceof PurchaseExpiredError && request) store!.remove(request);
+    if (error instanceof PurchasePendingError && !(error instanceof PurchaseExpiredError)) throw new Error(`${error.message}; rerun this command to resume`);
+    throw error;
   } finally {
     await buyer.close();
   }
@@ -156,6 +171,6 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(error instanceof Error ? error.message : error);
+  console.error((error instanceof Error ? error.message : "request failed").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, 256));
   process.exit(1);
 });

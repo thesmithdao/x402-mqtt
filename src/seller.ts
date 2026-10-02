@@ -9,6 +9,7 @@ import { createPublicClient, http, parseAbi, parseEventLogs, verifyTypedData, ty
 import { base, baseSepolia } from "viem/chains";
 import type { Ledger, LedgerEntry } from "./ledger.js";
 import { PAYMENT_KEY, PAYMENT_RESPONSE_KEY, parseAsk, isReading, type Catalog, type Offer, type Reading, type Reply } from "./spec.js";
+import { publicBrokerUrl } from "./recovery.js";
 
 export type SellerOptions = {
   offers: Offer[];
@@ -53,12 +54,12 @@ function authorizationOf(payment: PaymentPayload): Authorization | undefined {
   return authorization as Authorization;
 }
 
-function fits(authorization: Authorization, matched: PaymentRequirements): boolean {
+function fits(authorization: Authorization, matched: PaymentRequirements, recorded = false): boolean {
   const now = BigInt(Math.floor(Date.now() / 1000));
   return authorization.to.toLowerCase() === matched.payTo.toLowerCase()
     && BigInt(authorization.value) === BigInt(matched.amount)
     && BigInt(authorization.validAfter) <= now
-    && BigInt(authorization.validBefore) > now + 6n;
+    && (recorded || BigInt(authorization.validBefore) > now + 6n);
 }
 
 export class Seller extends EventEmitter {
@@ -160,7 +161,11 @@ export class Seller extends EventEmitter {
     let svm: SolanaPayment | undefined;
     if (isSolana) {
       try { svm = await inspectSolana(payment, matched); } catch { return reply(400, { error: "invalid Solana payment" }); }
-    } else if (!authorization || !fits(authorization, matched)) return reply(400, { error: "payment does not match the quote" });
+    } else {
+      const saved = authorization && this.options.ledger.forKey(`${matched.network}:${authorization.from.toLowerCase()}:${authorization.nonce.toLowerCase()}`);
+      const recorded = !!saved && ["verified", "pending", "settled", "recovered"].includes(saved.state);
+      if (!authorization || !fits(authorization, matched, recorded)) return reply(400, { error: "payment does not match the quote" });
+    }
     const payer = svm?.payer ?? authorization!.from.toLowerCase();
     const key = `${matched.network}:${payer}:${svm?.messageHash ?? authorization!.nonce.toLowerCase()}`;
     if (this.inflight.has(key)) return reply(409, { error: "payment already in progress" });
@@ -270,7 +275,7 @@ export class Seller extends EventEmitter {
     const cached = this.quoteCache.get(topic);
     if (cached) return cached;
     const paymentRequired = await this.server.createPaymentRequiredResponse(accepts, {
-      url: `${this.options.resourceBase}/${topic}`,
+      url: `${publicBrokerUrl(this.options.resourceBase).replace(/\/$/, "")}/${topic}`,
       description: offer?.description ?? topic,
       mimeType: "application/json",
     });

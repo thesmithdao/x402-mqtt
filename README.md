@@ -71,6 +71,12 @@ For agents, pass `network: SOLANA_NETWORK` to `createBuyer`; import the constant
 
 An offline device or invalid payment is refused before settlement. A settlement timeout can still mean a payment landed: the seller keeps it pending and checks the chain. Retry the same request and payment to recover its saved reading. The full protocol is in [SPEC.md](SPEC.md); it reuses x402's `PaymentRequired`, `PaymentPayload` and `SettleResponse`.
 
+### Recover a purchase
+
+If a CLI purchase is pending, rerun the same command. It resumes the original payment, including after a process restart. Before sending, the CLI saves unsigned recovery data in `$XDG_CACHE_HOME/x402-mqtt` or `~/.cache/x402-mqtt`. Records contain public payment terms, never keys or signatures. Keep this directory private; corrupt records stop the purchase. A successful purchase clears its record. Proven unused expiry clears it without buying again; the next command starts a new purchase.
+
+Library callers can catch `PurchasePendingError` and call `buyer.resume(error.request)`. For recovery after a process restart, persist the unsigned request with `onPrepared` before transmission and pass it to a new buyer with the same broker, wallet and network. `PurchaseExpiredError` means finalized chain evidence established unused expiry. Caps apply to each buyer instance; resuming reserves the original amount once.
+
 ## Sell any device
 
 Anything that publishes to MQTT can sell. Point the device at `raw/<topic>` and list the topic:
