@@ -7,3 +7,4 @@ export { Ledger, type LedgerEntry, type LedgerState } from "./ledger.js";
 export { createFacilitator } from "./facilitator.js";
 export { exportDataset } from "./export.js";
 export { macOffers, readMac, startMacSource, hasBattery } from "./sources/mac.js";
+export { SOLANA_NETWORK, SOLANA_USDC } from "./solana.js";

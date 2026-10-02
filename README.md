@@ -1,6 +1,6 @@
 # x402-mqtt
 
-x402 payments over MQTT. Your devices sell their data to agents, paid in USDC on Base.
+x402 payments over MQTT. Devices sell their data to agents, paid in USDC on Base or Solana.
 
 An x402 transport for MQTT, the protocol most connected devices already speak.
 
@@ -50,13 +50,26 @@ const buyer = await createBuyer({ url: "mqtt://127.0.0.1:1883", privateKey, maxP
 const { reading, settlement } = await buyer.buy("mac/battery/temperature");
 ```
 
+### Solana
+
+Base is the default. To sell on Solana, set `"network"` to `"solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"` and `"payout"` to a Solana address. To accept both, keep the Base config and add `"solanaPayout"`.
+
+```bash
+npx @cultos/x402-mqtt sell --mac --network solana --payout YOUR_SOLANA_ADDRESS
+npx @cultos/x402-mqtt buy mac/cpu/load --network solana --max 0.001
+```
+
+Set `X402_MQTT_BUYER_KEY` locally: an EVM hex key for Base, or a base58-encoded 64-byte Solana keypair for Solana. Never put keys in commands, prompts or repositories. The seller uses a payout address, not a wallet key. Buyer and recipient USDC token accounts must already exist. Coinbase advertises the fee payer and sponsors settlement fees.
+
+For agents, pass `network: SOLANA_NETWORK` to `createBuyer`; import the constant from `@cultos/x402-mqtt`. Spending caps apply to one buyer instance. Optional `rpcUrl` selects its RPC. Sellers use `rpcUrl` for their primary network and `solanaRpcUrl` for an additional Solana offer. The CLI accepts `--rpc`, `--solana-rpc` and `--solana-payout`.
+
 ## How it works
 
 1. The buyer asks on `x402/v1/req/<topic>` and gets a standard x402 `402` quote.
 2. It signs one exact USDC authorization and asks again with it.
 3. The bridge verifies the payment, makes sure it has a fresh reading, settles, and only then replies with the reading and the transaction.
 
-If the device is offline, the payment is invalid or settlement fails, nobody is charged. The full protocol is in [SPEC.md](SPEC.md). It follows the x402 transport template and reuses x402's own `PaymentRequired`, `PaymentPayload` and `SettleResponse`.
+An offline device or invalid payment is refused before settlement. A settlement timeout can still mean a payment landed: the seller keeps it pending and checks the chain. Retry the same request and payment to recover its saved reading. The full protocol is in [SPEC.md](SPEC.md); it reuses x402's `PaymentRequired`, `PaymentPayload` and `SettleResponse`.
 
 ## Sell any device
 
@@ -80,13 +93,13 @@ Already running a broker? Set `"broker"` to it with the bridge's username and pa
 ## Safety Notes
 
 - **Sellers hold no keys,** only a payout address. The facilitator key lives in the bridge and is never logged.
-- **Charged only for delivered data.** Settlement happens after the reading is in hand and before it's sent. Uncertain settlements are checked onchain, and count only if the exact USDC transfer to your payout is there.
+- **Readings retained before settlement.** Lost replies can be recovered using the same request and payment. Uncertain settlements stay pending until the exact payment is confirmed.
 - **Idempotent payments.** Replays, duplicates and concurrent reuse of one payment are refused. MQTT redelivery never double-charges.
 - **Private data stays private.** Raw readings and other buyers' replies are blocked at the broker, and the built-in broker only accepts requests that reply to the sender itself.
 - **Floods stay cheap.** Forged and unfunded payments are refused before they reach the facilitator. A wallet only earns a higher limit after it pays, and new buyers can't be locked out by a flood of fake IDs.
-- **Buyers have caps,** per call and in total, held even when buys run in parallel. A payment counts as spent until it expires unused on-chain, whatever the seller replies, and the same payment is resent instead of signing a new one.
+- **Buyers have caps,** per call and in total, held even when buys run in parallel. A payment counts as spent until it expires unused on-chain, whatever the seller replies, and the same payment is resent instead of signing a new one. Caps cover one buyer instance, not restarts.
 - **TLS for remote brokers.** The buyer and the seller refuse plain `mqtt://` or `ws://` to anything but localhost unless you pass `--allow-cleartext`.
-- **USDC only.** The buyer signs only for USDC on Base or Base Sepolia, so its caps always mean dollars, and it rejects malformed readings.
+- **USDC only.** Base and Solana buyers accept only canonical USDC, so their caps mean dollars. Solana supports ordinary keypair transfers; smart wallets, lookup tables and durable nonces are refused.
 
 ## datasets
 

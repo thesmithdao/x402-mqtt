@@ -10,6 +10,7 @@ async function coinbase(apiKeyId: string, apiKeySecret: string): Promise<Facilit
   });
   return new HTTPFacilitatorClient({
     url: CDP_FACILITATOR_URL,
+    timeoutMs: 30_000,
     createAuthHeaders: async () => {
       const [verify, settle, supported] = await Promise.all([headers("/verify", "POST"), headers("/settle", "POST"), headers("/supported", "GET")]);
       return { verify, settle, supported };
@@ -25,5 +26,7 @@ export async function createFacilitator(setting: string, env: NodeJS.ProcessEnv 
     return coinbase(apiKeyId, apiKeySecret);
   }
   if (!/^https:\/\/[^\s]+$/.test(setting)) throw new Error('facilitator must be "coinbase" or an https URL');
-  return new HTTPFacilitatorClient({ url: setting });
+  const url = new URL(setting);
+  if (url.username || url.password) throw new Error("facilitator URL must not contain credentials");
+  return new HTTPFacilitatorClient({ url: setting, timeoutMs: 30_000 });
 }

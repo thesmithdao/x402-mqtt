@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
-import { isAddress, type Address } from "viem";
+import { isAddress } from "viem";
 import type { Network } from "@x402/core/types";
+import { SOLANA_NETWORK, validateSvmAddress } from "./solana.js";
 import { isValidTopic, type Offer } from "./spec.js";
 
 export type Config = {
@@ -9,7 +10,9 @@ export type Config = {
   brokerPassword?: string;
   host: string;
   port: number;
-  payout: Address;
+  payout: string;
+  solanaPayout?: string;
+  solanaRpcUrl?: string;
   network: Network;
   facilitator: string;
   source?: "mac";
@@ -41,7 +44,9 @@ export function loadConfig(path: string | undefined, overrides: Partial<Config>)
   const file = path ?? "x402-mqtt.json";
   const fromFile = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Partial<Config>) : {};
   const config = { ...defaults, ...fromFile, ...Object.fromEntries(Object.entries(overrides).filter(([, value]) => value !== undefined)) } as Config;
-  if (!config.payout || !isAddress(config.payout)) throw new Error("set a payout address: --payout 0x… or \"payout\" in x402-mqtt.json");
+  if (!["eip155:8453", "eip155:84532", SOLANA_NETWORK].includes(config.network)) throw new Error("unsupported network");
+  if (typeof config.payout !== "string" || !(config.network === SOLANA_NETWORK ? validateSvmAddress(config.payout) : isAddress(config.payout))) throw new Error("set a valid payout address for the selected network");
+  if (config.solanaPayout !== undefined && (config.network === SOLANA_NETWORK || !validateSvmAddress(config.solanaPayout))) throw new Error("invalid optional Solana payout");
   if (!/^\d+(\.\d{1,6})?$/.test(config.price)) throw new Error("price must be a USD amount like 0.001");
   for (const offer of config.offers) {
     if (!isValidTopic(offer.topic)) throw new Error(`invalid topic: ${offer.topic}`);

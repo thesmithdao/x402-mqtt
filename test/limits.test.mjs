@@ -86,7 +86,7 @@ async function fakeSeller(broker, onPaid, window = 120) {
 
 test("concurrent buys never exceed the total cap", async () => {
   const broker = await startBuiltInBroker({ port: port() });
-  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 200, result: { value: 1, ts: Date.now() }, "x402/payment-response": { success: true, transaction: "0x1", network: "eip155:8453", payer: PAY_TO } }));
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 200, result: { value: 1, ts: Date.now() }, "x402/payment-response": { success: true, transaction: TX, network: "eip155:8453", payer: PAY_TO } }));
   const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.003" });
   try {
     const results = await Promise.allSettled(Array.from({ length: 10 }, () => buyer.buy("t")));
@@ -368,7 +368,7 @@ test("buyers refuse networks without a known USDC", async () => {
 
 test("a malformed reading from the seller is rejected", async () => {
   const broker = await startBuiltInBroker({ port: port() });
-  const seller = await fakeSeller(broker, request => ({ id: request.id, status: 200, result: { value: { evil: true }, ts: Date.now() }, "x402/payment-response": { success: true, transaction: "0x1", network: "eip155:8453", payer: PAY_TO } }));
+  const seller = await fakeSeller(broker, request => ({ id: request.id, status: 200, result: { value: { evil: true }, ts: Date.now() }, "x402/payment-response": { success: true, transaction: TX, network: "eip155:8453", payer: PAY_TO } }));
   const buyer = await createBuyer({ url: broker.url, privateKey: key() });
   try {
     await assert.rejects(buyer.buy("t"), /malformed/);

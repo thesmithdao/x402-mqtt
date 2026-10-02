@@ -90,7 +90,7 @@ Reply:
 
 A buyer that gets no reply MUST resend the same request with the same `id` and the same payment. It MUST NOT sign a new payment for the same request.
 
-Whoever holds a signed payment can settle it until it expires. Buyers MUST count every payment they send as spent until its `validBefore` has passed and the token contract shows it unused, whatever the reply says, and SHOULD refuse quotes with long payment windows.
+Whoever holds a signed payment can settle it until it expires. Buyers MUST count every signed payment as spent until expiry and chain evidence establish it unused, whatever the reply says. EVM uses `validBefore` and token authorization state. Solana uses the signed recent blockhash and complete finalized history; a wall-clock timeout is insufficient.
 
 ## Settlement Response Delivery
 
@@ -111,22 +111,31 @@ Whoever holds a signed payment can settle it until it expires. Buyers MUST count
 }
 ```
 
-The seller MUST settle only after it holds a reading fresh enough to deliver, and MUST reply only after settlement succeeds. A buyer is never charged for a reading it does not get.
+The seller MUST retain the fresh reading and reconciliation metadata before settlement, and reply with the reading only after payment succeeds. If a reply is lost, the same request/payment recovers that original reading. Readings more than 5 seconds in the future are refused.
 
-Sellers MUST make payments idempotent per `(network, payer, nonce)`. A repeat of a settled request with the same `id` gets the same reply. The same payment under a different `id` is refused.
+Sellers MUST make payments idempotent per network and payment identity: `(payer, nonce)` on EVM, immutable transaction message hash on Solana. Hashing Solana wire bytes is insufficient because the facilitator supplies the fee-payer signature. An identical settled request with the same `id` and topic gets the same reply after caller-signature validation. Reuse under another `id` or topic is refused. A new purchase uses a new request ID.
+
+## Solana
+
+Solana offers use x402 v2 `exact`, network `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`, and canonical six-decimal USDC mint `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`. Requirements include the facilitator's `extra.feePayer`. The payment payload contains a base64 partially signed transaction; the receipt transaction is its final base58 signature. Public keys and signatures are case-sensitive.
+
+0.2.0 accepts the SDK's ordinary keypair transaction: compute-unit limit, compute-unit price, one exact SPL `TransferChecked`, and a memo. Source and destination are the derived USDC token accounts. Required signers are the buyer and facilitator. Compute limits are at most 400,000 units and 50,000 microlamports per unit. Lookup tables, durable nonces and smart-wallet/CPI transactions are unsupported. Token accounts must already exist.
+
+The seller persists the message hash, token accounts, blockhash, submission context and original reading, never signed payment credentials. After an interrupted settlement it checks the known signature, or bounded recent source-account history for that exact message. Incomplete history or an unavailable RPC leaves payment pending. Saved payments retain their original fee payer when the facilitator advertises a new one; signature and quote checks still apply. Startup recovery has a bounded work window; remaining entries are reconciled on the same request's retry. One seller process owns a ledger.
 
 ## Error Handling
 
 Errors are replies with a non-200 `status` and an `error` string:
 
-| Status | Meaning | Charged |
+| Status | Meaning | Payment |
 |---|---|---|
 | `400` | Payment invalid or does not match the quote | No |
 | `402` | Payment required (the quote) | No |
 | `404` | Nothing for sale on this topic | No |
-| `409` | Payment already used, or already in progress | No |
+| `409` | Payment already used, or already in progress | Original payment may exist; no new settlement |
 | `429` | Too many requests | No |
-| `503` | Device offline, facilitator unavailable, or settlement failed | No |
+| `503` | Device offline, facilitator unavailable before settlement | No settlement submitted |
+| `503` | Settlement pending or confirmation unavailable | May have paid; retry the same request/payment |
 
 Requests larger than 16 KB, or without a valid `id` and `replyTo`, are dropped with no reply.
 

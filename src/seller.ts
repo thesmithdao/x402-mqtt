@@ -3,14 +3,18 @@ import { x402ResourceServer, type FacilitatorClient } from "@x402/core/server";
 import type { Network, PaymentPayload, PaymentRequired, PaymentRequirements, SettleResponse } from "@x402/core/types";
 import { authorizationTypes } from "@x402/evm";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
+import { ExactSvmScheme } from "@x402/svm/exact/server";
+import { SolanaChain, SOLANA_NETWORK, SOLANA_USDC, inspectSolana, solanaIdentity, validateSvmAddress, type SolanaPayment } from "./solana.js";
 import { createPublicClient, http, parseAbi, parseEventLogs, verifyTypedData, type Address, type Hex } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import type { Ledger, LedgerEntry } from "./ledger.js";
-import { PAYMENT_KEY, PAYMENT_RESPONSE_KEY, parseAsk, type Catalog, type Offer, type Reading, type Reply } from "./spec.js";
+import { PAYMENT_KEY, PAYMENT_RESPONSE_KEY, parseAsk, isReading, type Catalog, type Offer, type Reading, type Reply } from "./spec.js";
 
 export type SellerOptions = {
   offers: Offer[];
-  payTo: Address;
+  payTo: string;
+  solanaPayout?: string;
+  solanaRpcUrl?: string;
   network: Network;
   facilitator: FacilitatorClient;
   ledger: Ledger;
@@ -61,6 +65,7 @@ export class Seller extends EventEmitter {
   private server: x402ResourceServer;
   private requirements = new Map<string, PaymentRequirements[]>();
   private inflight = new Set<string>();
+  private requests = new Set<string>();
   private buckets = new Map<string, Bucket>();
   private payers = new Map<string, Bucket>();
   private verifies = new Map<string, Bucket>();
@@ -71,15 +76,27 @@ export class Seller extends EventEmitter {
   private admissions: Bucket = { tokens: 0, at: 0 };
   private quoteCache = new Map<string, PaymentRequired>();
   private chain;
+  private solana?: SolanaChain;
 
   constructor(private readonly options: SellerOptions) {
     super();
-    this.server = new x402ResourceServer(options.facilitator).register(options.network, new ExactEvmScheme());
+    this.server = new x402ResourceServer(options.facilitator);
+    if (options.network === SOLANA_NETWORK || options.solanaPayout) {
+      if (!validateSvmAddress(options.network === SOLANA_NETWORK ? options.payTo : options.solanaPayout!)) throw new Error("invalid Solana payout");
+      if (options.network === SOLANA_NETWORK && options.solanaPayout) throw new Error("Solana payout is already configured");
+      this.solana = new SolanaChain(options.network === SOLANA_NETWORK ? options.rpcUrl : options.solanaRpcUrl);
+      this.server.register(SOLANA_NETWORK, new ExactSvmScheme());
+    }
+    if (options.network !== SOLANA_NETWORK) {
+      if (!["eip155:8453", "eip155:84532"].includes(options.network)) throw new Error("unsupported network");
+      this.server.register(options.network, new ExactEvmScheme());
+    }
     this.chain = createPublicClient({ chain: options.network === "eip155:84532" ? baseSepolia : base, transport: http(options.rpcUrl) });
   }
 
   async start(): Promise<void> {
     await this.server.initialize();
+    await this.solana?.initialize();
     for (const offer of this.options.offers) {
       const accepts = await this.server.buildPaymentRequirements({
         scheme: "exact",
@@ -88,6 +105,10 @@ export class Seller extends EventEmitter {
         network: this.options.network,
         maxTimeoutSeconds: 120,
       });
+      if (this.options.solanaPayout) {
+        accepts.push(...await this.server.buildPaymentRequirements({ scheme: "exact", payTo: this.options.solanaPayout, price: { asset: SOLANA_USDC, amount: accepts[0].amount }, network: SOLANA_NETWORK, maxTimeoutSeconds: 120 }));
+      }
+      if (accepts.some(item => item.network === SOLANA_NETWORK && !validateSvmAddress(String(item.extra?.feePayer ?? "")))) throw new Error("facilitator did not advertise a Solana fee payer");
       this.requirements.set(offer.topic, accepts);
     }
     await this.recover();
@@ -121,97 +142,123 @@ export class Seller extends EventEmitter {
       return reply(402, { paymentRequired: await this.quoteFor(topic, accepts, offer) });
     }
 
-    const authorization = authorizationOf(payment);
-    if (!authorization) return reply(400, { error: "unsupported payment payload" });
-    const matched = this.server.findMatchingRequirements(accepts, payment);
-    if (!matched || !fits(authorization, matched)) return reply(400, { error: "payment does not match the quote" });
-    const payer = authorization.from.toLowerCase();
-    const key = `${this.options.network}:${payer}:${authorization.nonce.toLowerCase()}`;
-    const settled = this.options.ledger.settledFor(key);
-    if (settled) {
-      if (settled.id !== ask.id) return reply(409, { error: "payment already used" });
-      return reply(200, { result: settled.reading, [PAYMENT_RESPONSE_KEY]: settled.settlement });
-    }
-    if (this.inflight.has(key)) return reply(409, { error: "payment already in progress" });
-
-    this.inflight.add(key);
-    const started = performance.now();
-    const base = { id: ask.id, topic, key, payer: authorization.from, amount: authorization.value, network: this.options.network };
+    let matched: PaymentRequirements | undefined;
     try {
-      const known = this.isTrusted(payer);
-      const perPayer = this.options.payerPerMinute ?? 30;
-      const signature = (payment.payload as { signature?: Hex }).signature;
-      const typed = {
-        address: authorization.from,
-        domain: { name: String(matched.extra?.name ?? ""), version: String(matched.extra?.version ?? ""), chainId: Number(this.options.network.split(":")[1]), verifyingContract: matched.asset as Address },
-        types: authorizationTypes,
-        primaryType: "TransferWithAuthorization" as const,
-        message: { from: authorization.from, to: authorization.to, value: BigInt(authorization.value), validAfter: BigInt(authorization.validAfter), validBefore: BigInt(authorization.validBefore), nonce: authorization.nonce },
-        signature: signature ?? "0x",
-      };
-      const signedLocally = typeof signature === "string" && (await verifyTypedData(typed).catch(() => false));
-      let budgeted = false;
-      if (!signedLocally) {
-        const allowed = known ? this.limit(this.verifies, payer, perPayer) : this.take(this.unknownPayers, this.options.paymentsPerMinute ?? 300);
-        if (!allowed) return reply(429, { error: "too many requests, not charged" });
-        budgeted = !known;
-        const signedOnChain = typeof signature === "string" && (await this.chain.verifyTypedData(typed).catch(() => false));
-        if (!signedOnChain) return reply(400, { error: "invalid payment signature" });
+      let available = accepts;
+      if (payment.accepted?.network === SOLANA_NETWORK) {
+        const identity = solanaIdentity(payment);
+        const prior = this.options.ledger.forKey(`${SOLANA_NETWORK}:${identity.payer}:${identity.messageHash}`);
+        if (prior?.solana?.messageHash === identity.messageHash && ["verified", "pending", "settled", "recovered"].includes(prior.state)) {
+          available = accepts.map(item => item.network === SOLANA_NETWORK ? { ...item, extra: { ...item.extra, feePayer: identity.feePayer } } : item);
+        }
       }
-      if (!this.limit(this.payers, payer, perPayer)) return reply(429, { error: "too many requests, not charged" });
+      matched = this.server.findMatchingRequirements(available, payment);
+    } catch { return reply(400, { error: "unsupported payment payload" }); }
+    if (!matched) return reply(400, { error: "payment does not match the quote" });
+    const isSolana = matched.network === SOLANA_NETWORK;
+    const authorization = isSolana ? undefined : authorizationOf(payment);
+    let svm: SolanaPayment | undefined;
+    if (isSolana) {
+      try { svm = await inspectSolana(payment, matched); } catch { return reply(400, { error: "invalid Solana payment" }); }
+    } else if (!authorization || !fits(authorization, matched)) return reply(400, { error: "payment does not match the quote" });
+    const payer = svm?.payer ?? authorization!.from.toLowerCase();
+    const key = `${matched.network}:${payer}:${svm?.messageHash ?? authorization!.nonce.toLowerCase()}`;
+    if (this.inflight.has(key)) return reply(409, { error: "payment already in progress" });
+    this.inflight.add(key);
+    const requestKey = `${matched.network}:${payer}:${topic}:${ask.id}`;
+    let ownsRequest = false;
+    const started = performance.now();
+    const base = { id: ask.id, topic, key, payer: svm?.payer ?? authorization!.from, amount: matched.amount, network: matched.network };
+    try {
+      const known = this.isTrusted(`${matched.network}:${payer}`);
+      const perPayer = this.options.payerPerMinute ?? 30;
+      let budgeted = false;
+      if (!isSolana) {
+        const signature = (payment.payload as { signature?: Hex }).signature;
+        const typed = {
+          address: authorization!.from,
+          domain: { name: String(matched.extra?.name ?? ""), version: String(matched.extra?.version ?? ""), chainId: Number(matched.network.split(":")[1]), verifyingContract: matched.asset as Address },
+          types: authorizationTypes,
+          primaryType: "TransferWithAuthorization" as const,
+          message: { from: authorization!.from, to: authorization!.to, value: BigInt(authorization!.value), validAfter: BigInt(authorization!.validAfter), validBefore: BigInt(authorization!.validBefore), nonce: authorization!.nonce },
+          signature: signature ?? "0x",
+        };
+        const signedLocally = typeof signature === "string" && (await verifyTypedData(typed).catch(() => false));
+        if (!signedLocally) {
+          const allowed = known ? this.limit(this.verifies, payer, perPayer) : this.take(this.unknownPayers, this.options.paymentsPerMinute ?? 300);
+          if (!allowed) return reply(429, { error: "too many requests, not charged" });
+          budgeted = !known;
+          const signedOnChain = typeof signature === "string" && (await this.chain.verifyTypedData(typed).catch(() => false));
+          if (!signedOnChain) return reply(400, { error: "invalid payment signature" });
+        }
+      }
+      const existing = this.options.ledger.forKey(key);
+      if (existing && ["verified", "pending", "settled", "recovered"].includes(existing.state)) {
+        if (existing.id !== ask.id || existing.topic !== topic) return reply(409, { error: "payment already used" });
+        let settled = this.options.ledger.settledFor(key);
+        if (!settled) {
+          if (!this.limit(this.payers, `${matched.network}:${payer}`, perPayer) || !this.take(this.facilitatorCalls, this.options.facilitatorPerMinute ?? 600)) return reply(429, { error: "too many requests; payment pending" });
+          settled = await this.reconcileEntry(existing);
+        }
+        if (settled) return reply(200, { result: settled.reading, [PAYMENT_RESPONSE_KEY]: settled.settlement });
+        return reply(503, { error: "payment pending; retry the same request" });
+      }
+      const prior = this.options.ledger.forRequest(ask.id, topic, matched.network, base.payer);
+      if (prior && prior.key !== key) return reply(409, { error: "request already has a payment" });
+      if (this.requests.has(requestKey)) return reply(409, { error: "request already in progress" });
+      this.requests.add(requestKey);
+      ownsRequest = true;
+      if (!this.limit(this.payers, `${matched.network}:${payer}`, perPayer)) return reply(429, { error: "too many requests, not charged" });
       if (!known && !budgeted && !this.take(this.unknownPayers, this.options.paymentsPerMinute ?? 300)) return reply(429, { error: "too many requests, not charged" });
-
       if (!known) {
         let balance: bigint;
         try {
-          balance = await this.chain.readContract({ address: matched.asset as Address, abi: usdcAbi, functionName: "balanceOf", args: [authorization.from] });
-        } catch {
-          return reply(503, { error: "chain unavailable, not charged" });
-        }
-        if (balance < BigInt(authorization.value)) {
+          balance = svm ? await this.solana!.balance(svm.source) : await this.chain.readContract({ address: matched.asset as Address, abi: usdcAbi, functionName: "balanceOf", args: [authorization!.from] });
+        } catch { return reply(503, { error: "chain unavailable, not charged" }); }
+        if (balance < BigInt(matched.amount)) {
           this.record({ ...base, state: "rejected", error: "insufficient balance" });
           return reply(400, { error: "insufficient balance" });
         }
       }
-
       if (!this.take(this.facilitatorCalls, this.options.facilitatorPerMinute ?? 600)) return reply(429, { error: "too many requests, not charged" });
       let verified;
-      try {
-        verified = await this.server.verifyPayment(payment, matched);
-      } catch {
+      try { verified = await this.server.verifyPayment(payment, matched); } catch {
         this.record({ ...base, state: "refused", error: "facilitator unavailable, not charged" });
         return reply(503, { error: "facilitator unavailable, not charged" });
       }
-      if (!verified.isValid) {
-        const error = verified.invalidReason ?? "invalid payment";
-        this.record({ ...base, state: "rejected", error });
-        return reply(400, { error });
+      if (!verified.isValid || (isSolana && verified.payer !== svm!.payer)) {
+        this.record({ ...base, state: "rejected", error: "invalid payment" });
+        return reply(400, { error: "invalid payment" });
       }
-
       const reading = this.options.readings(topic);
       const maxAgeMs = this.options.maxAgeMs ?? 30_000;
-      if (!reading || Date.now() - reading.ts > maxAgeMs) {
+      if (!isReading(reading) || reading.ts > Date.now() + 5000 || Date.now() - reading.ts > maxAgeMs) {
         this.record({ ...base, state: "refused", error: "device offline, not charged" });
         return reply(503, { error: "device offline, not charged" });
       }
 
-      this.options.ledger.append({ ...base, state: "verified", reading, payTo: matched.payTo, asset: matched.asset });
+      if (svm) {
+        try { svm.slot = await this.solana!.context(); } catch { return reply(503, { error: "chain unavailable, not charged" }); }
+      }
+      const pending = this.options.ledger.append({ ...base, state: "verified", reading, payTo: matched.payTo, asset: matched.asset, ...(svm ? { solana: { messageHash: svm.messageHash, source: svm.source, destination: svm.destination, blockhash: svm.blockhash, slot: svm.slot } } : {}) });
       let settlement: SettleResponse | undefined;
       try {
         settlement = await this.server.settlePayment(payment, matched);
-      } catch {
-        settlement = await this.settledOnChain(authorization, { payTo: matched.payTo, amount: matched.amount, asset: matched.asset });
+        if (!settlement.success || settlement.network !== matched.network || (isSolana && settlement.payer !== svm!.payer)) throw new Error("invalid settlement response");
+      } catch (error) {
+        const transaction = (error as { transaction?: unknown })?.transaction;
+        const unresolved = typeof transaction === "string" && transaction ? { ...pending, tx: transaction } : pending;
+        const recovered = await this.reconcileEntry(unresolved);
+        if (recovered) return reply(200, { result: recovered.reading, [PAYMENT_RESPONSE_KEY]: recovered.settlement });
+        this.record({ ...unresolved, state: "pending", error: "payment pending" });
+        return reply(503, { error: "payment pending; retry the same request" });
       }
-      if (!settlement?.success) {
-        this.record({ ...base, state: "failed", error: "settlement failed, not charged" });
-        return reply(503, { error: "settlement failed, not charged" });
-      }
-
-      this.trust(payer);
-      this.record({ ...base, state: "settled", tx: settlement.transaction, reading, settlement, latencyMs: Math.round(performance.now() - started) });
+      this.trust(`${matched.network}:${payer}`);
+      this.record({ ...pending, state: "settled", tx: settlement.transaction, settlement, latencyMs: Math.round(performance.now() - started) });
       return reply(200, { result: reading, [PAYMENT_RESPONSE_KEY]: settlement });
     } finally {
       this.inflight.delete(key);
+      if (ownsRequest) this.requests.delete(requestKey);
     }
   }
 
@@ -300,16 +347,29 @@ export class Seller extends EventEmitter {
     }
   }
 
-  private async recover(): Promise<void> {
-    for (const entry of this.options.ledger.pending()) {
-      if (!entry.key || !entry.payer) continue;
-      if (entry.network && entry.network !== this.options.network) continue;
+  private async reconcileEntry(entry: LedgerEntry): Promise<LedgerEntry | undefined> {
+    if (!entry.key || !entry.payer || !entry.reading) return undefined;
+    let settlement: SettleResponse | undefined;
+    if (entry.network === SOLANA_NETWORK) {
+      if (!this.solana || !entry.solana) return undefined;
+      try { settlement = (await this.solana.reconcile(entry.solana, entry.payer, entry.tx)).settlement; } catch { return undefined; }
+    } else {
+      if (entry.network && entry.network !== this.options.network) return undefined;
       const nonce = entry.key.split(":").at(-1) as Hex;
-      const asset = entry.asset ?? this.requirements.get(entry.topic)?.[0]?.asset;
-      const settlement = await this.settledOnChain({ from: entry.payer as Address, nonce }, { payTo: entry.payTo ?? this.options.payTo, amount: entry.amount ?? "0", asset });
-      if (settlement?.success) {
-        this.record({ id: entry.id, topic: entry.topic, key: entry.key, payer: entry.payer, amount: entry.amount, network: entry.network, state: "recovered", tx: settlement.transaction, reading: entry.reading, settlement });
-      }
+      const asset = entry.asset ?? this.requirements.get(entry.topic)?.find(item => item.network !== SOLANA_NETWORK)?.asset;
+      settlement = await this.settledOnChain({ from: entry.payer as Address, nonce }, { payTo: entry.payTo ?? this.options.payTo, amount: entry.amount ?? "0", asset });
+    }
+    if (!settlement?.success) return undefined;
+    const recovered = this.options.ledger.append({ ...entry, state: "recovered", tx: settlement.transaction, settlement });
+    this.emit("entry", recovered);
+    return recovered;
+  }
+
+  private async recover(): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    for (const entry of this.options.ledger.pending()) {
+      if (Date.now() >= deadline) break;
+      await this.reconcileEntry(entry);
     }
   }
 }
