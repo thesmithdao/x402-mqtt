@@ -77,12 +77,14 @@ async function sell(values: Record<string, string | boolean | undefined>) {
     solanaPayout: config.solanaPayout,
     solanaRpcUrl: config.solanaRpcUrl,
   });
+  seller.on("warning", message => console.error(message));
   await seller.start();
   const bridge = await startBridge(client, latest, seller);
   const stopSource = config.source === "mac" ? startMacSource(bridge.publishReading) : undefined;
   const page = config.pagePort === false ? undefined : await startPage({ port: config.pagePort, seller, ledger, offers, latest, testBuyers: config.testBuyers });
 
-  console.log(`selling on ${publicBrokerUrl(url)} · payout ${config.payout} · ${networkName(config.network)}${config.solanaPayout ? " + Solana" : ""}`);
+  const networks = [...new Set(seller.catalog().offers.flatMap(offer => offer.accepts.map(terms => networkName(terms.network))))].join(" + ");
+  console.log(`selling on ${publicBrokerUrl(url)} · payout ${config.payout} · ${networks}`);
   for (const offer of offers) console.log(`  ${offer.topic.padEnd(28)} $${offer.price}`);
   if (page) console.log(`sales page  http://127.0.0.1:${config.pagePort}`);
   seller.on("entry", entry => {

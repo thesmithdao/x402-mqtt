@@ -12,7 +12,7 @@ import { ExactEvmScheme } from "@x402/evm/exact/client";
 import mqtt from "mqtt";
 import { encodeAbiParameters, encodeEventTopics, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { Ledger, Seller, SpendCapError, PurchasePendingError, PurchaseExpiredError, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
+import { Ledger, Seller, SpendCapError, PurchasePendingError, PurchaseExpiredError, SOLANA_NETWORK, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
 import { startPage } from "../dist/page.js";
 import { PurchaseStore } from "../dist/recovery.js";
 
@@ -87,6 +87,32 @@ async function fakeSeller(broker, onPaid, window = 120) {
   });
   return client;
 }
+
+test("Base payments work while optional Solana RPC is unavailable", async t => {
+  const rpc = await fakeRpc({ balance: 1000000n });
+  t.after(() => rpc.close());
+  let solanaCalls = 0;
+  const outage = createServer((_request, response) => { solanaCalls++; response.writeHead(503); response.end(); });
+  await new Promise(resolve => outage.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => outage.close(resolve)));
+  const solanaRpcUrl = `http://127.0.0.1:${outage.address().port}`;
+  const solanaPayout = "BESFJe2NoWVHefr94deAA7C41wCmg2RW9zob11akRFSg";
+  const counter = { verify: 0 };
+  const facilitator = { ...payingFacilitator(counter), getSupported: async () => ({ kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:8453" }, { x402Version: 2, scheme: "exact", network: SOLANA_NETWORK, extra: { feePayer: solanaPayout } }], extensions: [], signers: { [SOLANA_NETWORK]: [solanaPayout] } }) };
+  const baseOnly = makeSeller(counter, rpc, { facilitator, solanaRpcUrl });
+  await baseOnly.start();
+  assert.equal(solanaCalls, 0);
+  const dual = makeSeller(counter, rpc, { facilitator, solanaRpcUrl, solanaPayout });
+  await dual.start();
+  assert.equal(solanaCalls, 1);
+  const payment = await signed(dual);
+  const result = await ask(dual, payment);
+  assert.equal(result.reply.status, 200);
+  assert.equal(result.reply["x402/payment-response"].network, "eip155:8453");
+  assert.equal(counter.verify, 1);
+  assert.equal(solanaCalls, 1);
+  assert.equal(dual.options.ledger.all().at(-1).state, "settled");
+});
 
 test("concurrent buys never exceed the total cap", async () => {
   const broker = await startBuiltInBroker({ port: port() });

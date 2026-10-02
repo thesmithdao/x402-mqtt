@@ -125,6 +125,8 @@ Solana offers use x402 v2 `exact`, network `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZK
 
 The seller persists the message hash, token accounts, blockhash, submission context and original reading, never signed payment credentials. After an interrupted settlement it checks the known signature, or bounded recent source-account history for that exact message. Incomplete history or an unavailable RPC leaves payment pending. Saved payments retain their original fee payer when the facilitator advertises a new one; signature and quote checks still apply. Startup recovery has a bounded work window; remaining entries are reconciled on the same request's retry. One seller process owns a ledger.
 
+A Base seller with optional Solana can start with Base alone after a transient Solana connection, timeout or HTTP failure. It warns and omits Solana offers until an explicit restart. Existing Solana ledger entries remain pending. Network, authentication and malformed-response failures still refuse startup. A Solana-only seller requires successful initialization.
+
 ## Error Handling
 
 Errors are replies with a non-200 `status` and an `error` string:

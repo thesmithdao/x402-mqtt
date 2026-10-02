@@ -4,7 +4,7 @@ import type { Network, PaymentPayload, PaymentRequired, PaymentRequirements, Set
 import { authorizationTypes } from "@x402/evm";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { ExactSvmScheme } from "@x402/svm/exact/server";
-import { SolanaChain, SOLANA_NETWORK, SOLANA_USDC, inspectSolana, solanaIdentity, validateSvmAddress, type SolanaPayment } from "./solana.js";
+import { SolanaChain, SolanaRpcUnavailableError, SOLANA_NETWORK, SOLANA_USDC, inspectSolana, solanaIdentity, validateSvmAddress, type SolanaPayment } from "./solana.js";
 import { createPublicClient, http, parseAbi, parseEventLogs, verifyTypedData, type Address, type Hex } from "viem";
 import { base, baseSepolia } from "viem/chains";
 import type { Ledger, LedgerEntry } from "./ledger.js";
@@ -78,6 +78,7 @@ export class Seller extends EventEmitter {
   private quoteCache = new Map<string, PaymentRequired>();
   private chain;
   private solana?: SolanaChain;
+  private solanaReady = false;
 
   constructor(private readonly options: SellerOptions) {
     super();
@@ -97,7 +98,11 @@ export class Seller extends EventEmitter {
 
   async start(): Promise<void> {
     await this.server.initialize();
-    await this.solana?.initialize();
+    this.solanaReady = false;
+    if (this.solana) {
+      try { await this.solana.initialize(); this.solanaReady = true; }
+      catch (error) { if (this.options.network === SOLANA_NETWORK || !(error instanceof SolanaRpcUnavailableError)) throw error; }
+    }
     for (const offer of this.options.offers) {
       const accepts = await this.server.buildPaymentRequirements({
         scheme: "exact",
@@ -110,8 +115,10 @@ export class Seller extends EventEmitter {
         accepts.push(...await this.server.buildPaymentRequirements({ scheme: "exact", payTo: this.options.solanaPayout, price: { asset: SOLANA_USDC, amount: accepts[0].amount }, network: SOLANA_NETWORK, maxTimeoutSeconds: 120 }));
       }
       if (accepts.some(item => item.network === SOLANA_NETWORK && !validateSvmAddress(String(item.extra?.feePayer ?? "")))) throw new Error("facilitator did not advertise a Solana fee payer");
-      this.requirements.set(offer.topic, accepts);
+      this.requirements.set(offer.topic, accepts.filter(item => this.solanaReady || item.network !== SOLANA_NETWORK));
     }
+    this.quoteCache.clear();
+    if (this.solana && !this.solanaReady) this.emit("warning", "Solana RPC unavailable; serving Base only. Restart after recovery.");
     await this.recover();
   }
 
@@ -373,6 +380,7 @@ export class Seller extends EventEmitter {
   private async recover(): Promise<void> {
     const deadline = Date.now() + 15_000;
     for (const entry of this.options.ledger.pending()) {
+      if (entry.network === SOLANA_NETWORK && !this.solanaReady) continue;
       if (Date.now() >= deadline) break;
       await this.reconcileEntry(entry);
     }

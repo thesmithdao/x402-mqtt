@@ -85,6 +85,8 @@ export async function inspectSolanaMessage(transaction: ReturnType<typeof decode
   return { payer, amount, source: expectedSource, destination: expectedDestination, blockhash: compiled.lifetimeToken, messageHash: transactionMessageHash(transaction), slot: 0 };
 }
 
+export class SolanaRpcUnavailableError extends Error {}
+
 export class SolanaChain {
   constructor(readonly url = "https://api.mainnet-beta.solana.com") {
     const { protocol, hostname, username, password } = new URL(url);
@@ -93,9 +95,19 @@ export class SolanaChain {
 
   async call<T>(method: string, params: unknown[] = [], deadline = Date.now() + 10_000): Promise<T> {
     const remaining = deadline - Date.now();
-    if (remaining <= 0) throw new Error("Solana RPC timeout");
-    const response = await fetch(this.url, { method: "POST", headers: { "content-type": "application/json" }, redirect: "error", signal: AbortSignal.timeout(Math.min(remaining, 10_000)), body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-    if (!response.ok || !response.body) throw new Error("Solana RPC unavailable");
+    if (remaining <= 0) throw new SolanaRpcUnavailableError("Solana RPC timeout");
+    let response: Response;
+    try {
+      response = await fetch(this.url, { method: "POST", headers: { "content-type": "application/json" }, redirect: "error", signal: AbortSignal.timeout(Math.min(remaining, 10_000)), body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+    } catch (error) {
+      if (error instanceof TypeError || (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name))) throw new SolanaRpcUnavailableError("Solana RPC unavailable");
+      throw error;
+    }
+    if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => undefined);
+      if ([408, 429].includes(response.status) || response.status >= 500) throw new SolanaRpcUnavailableError("Solana RPC unavailable");
+      throw new Error("Solana RPC unavailable");
+    }
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
@@ -107,6 +119,9 @@ export class SolanaChain {
         if (size > 1_048_576) throw new Error("Solana RPC response too large");
         chunks.push(value);
       }
+    } catch (error) {
+      if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) throw new SolanaRpcUnavailableError("Solana RPC timeout");
+      throw error;
     } finally {
       await reader.cancel().catch(() => undefined);
     }

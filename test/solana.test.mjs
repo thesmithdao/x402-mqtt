@@ -33,6 +33,9 @@ async function fixture(t, options = {}) {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const call = JSON.parse(Buffer.concat(chunks));
+    if (state.disconnect) { request.socket.destroy(); return; }
+    if (state.malformedRpc) { response.end("invalid JSON"); return; }
+    if (state.rpcStatus) { response.writeHead(state.rpcStatus); response.end(); return; }
     let result;
     if (call.method === "getGenesisHash") result = state.wrongCluster ? recipient.address : SOLANA_NETWORK.slice(7);
     else if (call.method === "getSlot") result = 1000;
@@ -255,6 +258,68 @@ test("a blockhash absent from finalized state is not proof of unused expiry", as
   assert.equal(await chain.expiredUnused(proof, f.payer.address), true);
   delete proof.lastValidBlockHeight;
   assert.equal(await chain.expiredUnused(proof, f.payer.address), false);
+});
+
+test("optional Solana RPC outage keeps Base quotes available without advertising Solana", async t => {
+  const f = await fixture(t);
+  f.state.rpcStatus = 503;
+  const ledger = new Ledger(f.path);
+  ledger.append({ id: "pending", topic: "sensor", state: "pending", key: "solana-pending", network: SOLANA_NETWORK, payer: f.payer.address, reading: { value: 42, ts: Date.now() }, solana: { messageHash: "pending", source: f.payer.address, destination: f.recipient.address, blockhash: f.recipient.address, slot: 1 } });
+  const seller = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc, ledger });
+  const warnings = [];
+  seller.on("warning", message => warnings.push(message));
+  await seller.start();
+  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453"]);
+  const reply = (await seller.handle("sensor", Buffer.from(JSON.stringify({ id: "quote", replyTo: "x402/v1/res/test/quote" })))).reply;
+  assert.equal(reply.status, 402);
+  assert.deepEqual(reply.paymentRequired.accepts.map(item => item.network), ["eip155:8453"]);
+  assert.deepEqual(warnings, ["Solana RPC unavailable; serving Base only. Restart after recovery."]);
+  assert.equal(ledger.pending().length, 1);
+  assert.equal(f.state.verify, 0);
+  assert.equal(f.state.settle, 0);
+  for (const status of [408, 429, 500]) {
+    f.state.rpcStatus = status;
+    const unavailable = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
+    await unavailable.start();
+    assert.deepEqual(unavailable.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453"]);
+  }
+  f.state.rpcStatus = undefined;
+  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453"]);
+  const restarted = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
+  await restarted.start();
+  assert.deepEqual(restarted.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453", SOLANA_NETWORK]);
+});
+
+test("optional Solana authentication and cluster mismatches still refuse startup", async t => {
+  const f = await fixture(t);
+  for (const status of [401, 403, 400]) {
+    f.state.rpcStatus = status;
+    const seller = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
+    await assert.rejects(seller.start(), /Solana RPC unavailable/);
+  }
+  f.state.rpcStatus = undefined;
+  f.state.malformedRpc = true;
+  const malformed = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
+  await assert.rejects(malformed.start(), SyntaxError);
+  f.state.malformedRpc = false;
+  f.state.wrongCluster = true;
+  const seller = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
+  await assert.rejects(seller.start(), /network mismatch/);
+  f.state.wrongCluster = false;
+  f.state.rpcStatus = 503;
+  await assert.rejects(f.makeSeller().start(), /Solana RPC unavailable/);
+  assert.equal(f.state.verify, 0);
+  assert.equal(f.state.settle, 0);
+});
+
+test("optional Solana connection loss keeps Base available", async t => {
+  const f = await fixture(t);
+  f.state.disconnect = true;
+  const seller = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
+  await seller.start();
+  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453"]);
+  assert.equal(f.state.verify, 0);
+  assert.equal(f.state.settle, 0);
 });
 
 test("Solana config is explicit and corrupt ledgers refuse startup", async t => {

@@ -63,6 +63,8 @@ Set `X402_MQTT_BUYER_KEY` locally: an EVM hex key for Base, or a base58-encoded 
 
 For agents, pass `network: SOLANA_NETWORK` to `createBuyer`; import the constant from `@cultos/x402-mqtt`. Spending caps apply to one buyer instance. Optional `rpcUrl` selects its RPC. Sellers use `rpcUrl` for their primary network and `solanaRpcUrl` for an additional Solana offer. The CLI accepts `--rpc`, `--solana-rpc` and `--solana-payout`.
 
+If an optional Solana RPC is temporarily unavailable at startup, the seller warns and offers Base only. Restart after RPC recovery to enable Solana. Wrong-network, authentication and malformed-RPC responses still stop startup; a Solana-only seller requires its RPC.
+
 ## How it works
 
 1. The buyer asks on `x402/v1/req/<topic>` and gets a standard x402 `402` quote.
