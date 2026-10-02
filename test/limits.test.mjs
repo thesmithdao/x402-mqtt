@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -10,8 +12,9 @@ import { ExactEvmScheme } from "@x402/evm/exact/client";
 import mqtt from "mqtt";
 import { encodeAbiParameters, encodeEventTopics, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { Ledger, Seller, SpendCapError, PurchasePendingError, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
+import { Ledger, Seller, SpendCapError, PurchasePendingError, PurchaseExpiredError, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
 import { startPage } from "../dist/page.js";
+import { PurchaseStore } from "../dist/recovery.js";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -53,12 +56,13 @@ function fakeRpc(options = {}) {
       const call = JSON.parse(body);
       const result = item => {
         if (item.method === "eth_chainId") return "0x2105";
+        if (item.method === "eth_getBlockByNumber") return options.finalizedUnavailable ? null : { number: "0x100000", timestamp: `0x${BigInt(options.finalizedTimestamp ?? Math.floor(Date.now() / 1000)).toString(16)}`, transactions: [] };
         if (item.method === "eth_blockNumber") return "0x100000";
         if (item.method === "eth_getLogs") return options.logs ?? [];
         if (item.method === "eth_getTransactionReceipt") return options.receipt ?? null;
         const data = item.params?.[0]?.data ?? item.params?.[0]?.input ?? "";
         if (data.startsWith("0x70a08231")) return word(options.balance ?? 0n);
-        if (data.startsWith("0xe94a0102")) return word(options.used ? 1n : 0n);
+        if (data.startsWith("0xe94a0102")) { options.authorizationBlock = item.params[1]; return word(options.used ? 1n : 0n); }
         return word(options.signature ? 1n : 0n);
       };
       const answer = item => ({ jsonrpc: "2.0", id: item.id, result: result(item) });
@@ -138,6 +142,67 @@ test("a held payment is released only after it expires unused on-chain", async (
     await seller.endAsync();
     await broker.close();
   }
+});
+
+test("Base holds spending until finalized state passes authorization expiry", async t => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503, error: "payment pending" }));
+  const rpc = await fakeRpc({ used: false, finalizedTimestamp: 1 });
+  let request;
+  const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001", rpcUrl: rpc.url, onPrepared: record => { request = record; } });
+  t.after(async () => { await buyer.close(); await seller.endAsync(); await broker.close(); rpc.close(); });
+  await assert.rejects(buyer.buy("t"), PurchasePendingError);
+  const expired = { ...request, authorization: { ...request.authorization, validAfter: "1", validBefore: "2" } };
+  const pending = error => error instanceof PurchasePendingError && !(error instanceof PurchaseExpiredError);
+  await assert.rejects(buyer.resume(expired), pending);
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+  rpc.options.finalizedTimestamp = 12;
+  await assert.rejects(buyer.resume(expired), pending);
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+  rpc.options.finalizedTimestamp = 13;
+  rpc.options.used = true;
+  await assert.rejects(buyer.resume(expired), pending);
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+  assert.equal(rpc.options.authorizationBlock, "0x100000");
+  rpc.options.used = false;
+  await assert.rejects(buyer.resume(expired), PurchaseExpiredError);
+  await assert.rejects(buyer.buy("t"), pending);
+});
+
+test("Base missing finalized state retains recovery and its spending hold", async t => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503, error: "payment pending" }));
+  const rpc = await fakeRpc({ used: false, finalizedUnavailable: true });
+  let request;
+  const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001", rpcUrl: rpc.url, onPrepared: record => { request = record; } });
+  t.after(async () => { await buyer.close(); await seller.endAsync(); await broker.close(); rpc.close(); });
+  await assert.rejects(buyer.buy("t"), PurchasePendingError);
+  const expired = { ...request, authorization: { ...request.authorization, validAfter: "1", validBefore: "2" } };
+  await assert.rejects(buyer.resume(expired), error => error instanceof PurchasePendingError && !(error instanceof PurchaseExpiredError));
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+});
+
+test("the Base CLI retains its checkpoint while finalized state lags expiry", async t => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503, error: "payment pending" }));
+  const rpc = await fakeRpc({ used: false, finalizedTimestamp: 1 });
+  const privateKey = key();
+  let request;
+  const buyer = await createBuyer({ url: broker.url, privateKey, maxPerCall: "0.001", maxTotal: "0.001", rpcUrl: rpc.url, onPrepared: record => { request = record; } });
+  t.after(async () => { await buyer.close(); await seller.endAsync(); await broker.close(); rpc.close(); });
+  await assert.rejects(buyer.buy("t"), PurchasePendingError);
+  const expired = { ...request, authorization: { ...request.authorization, validAfter: "1", validBefore: "2" } };
+  const directory = mkdtempSync(join(tmpdir(), "mqtt-base-finality-"));
+  const store = new PurchaseStore(join(directory, "x402-mqtt"), broker.url, accept.network, request.payer, "t");
+  store.save(expired);
+  const run = promisify(execFile);
+  const args = [join(process.cwd(), "dist/cli.js"), "buy", "t", "--broker", broker.url, "--network", "base", "--rpc", rpc.url, "--max", "0.001"];
+  const env = { PATH: process.env.PATH, HOME: directory, XDG_CACHE_HOME: directory, X402_MQTT_BUYER_KEY: privateKey };
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15000 }), error => /payment pending/.test(error.stderr));
+  assert.deepEqual(store.load(), expired);
+  rpc.options.finalizedTimestamp = 13;
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15000 }), error => /expired unused/.test(error.stderr));
+  assert.equal(store.load(), undefined);
 });
 
 test("quotes with long payment windows are refused", async () => {

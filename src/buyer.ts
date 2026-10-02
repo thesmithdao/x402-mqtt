@@ -129,6 +129,14 @@ export async function createBuyer(options: BuyerOptions) {
     return { id, paymentRequired: reply.paymentRequired };
   }
 
+  async function baseExpiredUnused(authorization: { nonce: Hex; validBefore: bigint }, asset: Address): Promise<boolean> {
+    if (authorization.validBefore + EXPIRY_MARGIN_SECONDS >= BigInt(Math.floor(Date.now() / 1000))) return false;
+    if (await chain.getChainId() !== Number(network.split(":")[1])) return false;
+    const finalized = await chain.getBlock({ blockTag: "finalized" });
+    if (finalized.number === null || finalized.timestamp <= authorization.validBefore + EXPIRY_MARGIN_SECONDS) return false;
+    return !await chain.readContract({ address: asset, abi: usdcAbi, functionName: "authorizationState", args: [account.address as Address, authorization.nonce], blockNumber: finalized.number });
+  }
+
   async function reclaim(): Promise<void> {
     const now = BigInt(Math.floor(Date.now() / 1000));
     for (const [nonce, hold] of [...holds]) {
@@ -140,9 +148,7 @@ export async function createBuyer(options: BuyerOptions) {
       }
       if (hold.validBefore + EXPIRY_MARGIN_SECONDS > now) continue;
       try {
-        if (await chain.getChainId() !== Number(network.split(":")[1])) continue;
-        const used = await chain.readContract({ address: hold.asset, abi: usdcAbi, functionName: "authorizationState", args: [account.address as Address, hold.nonce], blockTag: "finalized" });
-        if (!used && holds.get(nonce) === hold) { holds.delete(nonce); accounted.delete(nonce); spent -= hold.amount; }
+        if (await baseExpiredUnused(hold, hold.asset) && holds.get(nonce) === hold) { holds.delete(nonce); accounted.delete(nonce); spent -= hold.amount; }
       } catch {}
     }
   }
@@ -239,9 +245,7 @@ export async function createBuyer(options: BuyerOptions) {
           unused = await solana!.expiredUnused({ ...proof, slot: request.solana!.slot, lastValidBlockHeight: request.solana!.lastValidBlockHeight }, account.address);
         } else {
           const auth = request.authorization!;
-          if (BigInt(auth.validBefore) + EXPIRY_MARGIN_SECONDS < BigInt(Math.floor(Date.now() / 1000)) && await chain.getChainId() === Number(network.split(":")[1])) {
-            unused = !await chain.readContract({ address: payment.accepted.asset as Address, abi: usdcAbi, functionName: "authorizationState", args: [account.address as Address, auth.nonce as Hex], blockTag: "finalized" });
-          }
+          unused = await baseExpiredUnused({ nonce: auth.nonce as Hex, validBefore: BigInt(auth.validBefore) }, payment.accepted.asset as Address);
         }
       } catch {}
       if (unused) throw new PurchaseExpiredError(request, "payment expired unused; retry to start a new purchase");
