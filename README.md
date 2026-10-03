@@ -59,18 +59,16 @@ try {
 
 ### Solana
 
-Solana is part of the unreleased 0.2.0 candidate. Run these examples from that checkout.
-
 Sell on Solana:
 
 ```bash
-node dist/cli.js sell --mac --network solana --payout YOUR_SOLANA_ADDRESS
+npx @cultos/x402-mqtt@0.2.0 sell --mac --network solana --payout YOUR_SOLANA_ADDRESS
 ```
 
 Buy a reading in another terminal:
 
 ```bash
-node dist/cli.js buy mac/cpu/load --network solana --max 0.001
+npx @cultos/x402-mqtt@0.2.0 buy mac/cpu/load --network solana --max 0.001
 ```
 
 Load the buyer's base58-encoded 64-byte keypair into `X402_MQTT_BUYER_KEY`. The buyer and payout wallets need USDC token accounts; the buyer needs enough USDC for the purchase. The facilitator sponsors settlement fees.
@@ -78,7 +76,7 @@ Load the buyer's base58-encoded 64-byte keypair into `X402_MQTT_BUYER_KEY`. The 
 To accept both Base and Solana:
 
 ```bash
-node dist/cli.js sell --mac --payout 0xYourAddress --solana-payout YOUR_SOLANA_ADDRESS
+npx @cultos/x402-mqtt@0.2.0 sell --mac --payout 0xYourAddress --solana-payout YOUR_SOLANA_ADDRESS
 ```
 
 Devices keep publishing the same readings. Buyers choose the payment network. In code, import `SOLANA_NETWORK` and pass it as `network` to `createBuyer`.
