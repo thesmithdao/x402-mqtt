@@ -153,6 +153,16 @@ Library callers can catch `PurchasePendingError` and call `buyer.resume(error.re
 
 `onPrepared` completes before transmission. If it throws or rejects, the purchase sends no payment and releases its spending reservation. A record saved before that failure can still be resumed; it must reserve capacity again. Resuming that payment on the same buyer while its checkpoint callback is running is refused. Submitted or uncertain payments retain their reservations.
 
+## Safety
+
+- **Seller keys:** sellers hold only a payout address, never a wallet key. Facilitator credentials stay in the bridge and are not logged.
+- **Delivery and recovery:** the seller retains the reading before settlement. The same request and payment recover the original result without another settlement. Reusing a payment for a different request or topic is refused. Uncertain settlements remain pending until the exact payment is confirmed.
+- **Broker access:** raw readings are restricted to the seller; buyers can read only their own replies. The built-in broker binds reply topics to the requesting client.
+- **Abuse controls:** forged and unfunded payments are refused before facilitator calls. A wallet earns a higher request limit only after payment; fake buyer IDs cannot consume other buyers' limits.
+- **Spending caps:** per-call and total caps apply across concurrent buys within one buyer instance, not across restarts. Sent payments remain counted until confirmed unused after expiry. A failed checkpoint sends no payment and releases its reservation.
+- **Transport:** remote brokers require TLS. Plain `mqtt://` and `ws://` are refused outside localhost unless `--allow-cleartext` is explicitly enabled.
+- **Assets and wallets:** buyers accept canonical USDC on Base or Solana. Solana supports ordinary keypair transfers with existing token accounts; smart wallets, lookup tables and durable nonces are refused.
+
 ## Upgrade notes
 
 Existing Base configuration remains valid. One seller process owns each ledger. Preserve the newest ledger and buyer recovery records during upgrades and rollbacks.

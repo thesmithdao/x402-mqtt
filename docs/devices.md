@@ -46,7 +46,3 @@ BROKER_URL=mqtts://your-broker MQTT_USERNAME=phone MQTT_PASSWORD=… node phone.
 ```
 
 Keep the phone charging, and set Termux and Termux:API to **Unrestricted** battery use.
-
-## Privacy
-
-Absolute pressure gives away altitude, and light shows when you are home. Sell the 3-hour pressure change, not the raw value, and leave out light, GPS and the microphone.
