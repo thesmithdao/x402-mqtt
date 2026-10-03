@@ -1,146 +1,144 @@
 # x402-mqtt
 
-x402 payments over MQTT. Devices sell their data to agents, paid in USDC on Base or Solana.
+Sell machine data over MQTT, paid in USDC on Base or Solana.
 
-Uses x402 v2 over MQTT, with the existing broker and a local payment bridge.
+Devices publish readings. Agents request them, pay through x402, and receive the data with a payment receipt.
 
-![architecture](docs/architecture.svg)
+![Architecture](docs/architecture.svg)
 
-The first real use case is a [MacBook selling](EVIDENCE.md) its own sensor readings on Base mainnet.
+## Sell readings
 
-## Try it live
+Load `CDP_API_KEY_ID` and `CDP_API_KEY_SECRET` into your local environment.
 
-Three machines sell their own readings at [cultos.dev/machines](https://www.cultos.dev/machines): two in Germany and an IoT device in Brazil. Buy one for $0.001 with a wallet holding a little USDC on Base:
+These examples use your Mac’s built-in readings. Linux and Android collectors are covered below.
 
-```bash
-npx @cultos/x402-mqtt buy machine01/uptime --broker wss://machines.cultos.dev/mqtt --max 0.001
-```
-
-Load `X402_MQTT_BUYER_KEY` into your local environment first. Never paste wallet keys into commands, prompts or repositories. The public fleet currently accepts Base; Solana support below is for your own seller.
-
-## Sell your Mac's readings
-
-Load `CDP_API_KEY_ID` and `CDP_API_KEY_SECRET` into your local environment, then run:
+### Base
 
 ```bash
-npx @cultos/x402-mqtt sell --mac --payout 0xYourAddress
+npx @cultos/x402-mqtt@0.2.0 sell --mac --payout 0xYourAddress
 ```
 
-```
-selling on mqtt://127.0.0.1:1883 · payout 0xYourAddress · Base
-  mac/battery/temperature      $0.001
-  mac/battery/level            $0.001
-  mac/power/watts              $0.001
-  …
-sales page  http://127.0.0.1:4020
-```
-
-The built-in broker starts automatically, so there's nothing else to install. Money goes straight to your payout address; the seller side never holds a key.
-
-## Buy a reading
-
-```bash
-npx @cultos/x402-mqtt buy mac/battery/temperature --max 0.001
-paid $0.001 · 31.4 °C · tx 0xec7f730c…
-```
-
-Or from an agent:
-
-```ts
-import { createBuyer } from "@cultos/x402-mqtt";
-
-const buyer = await createBuyer({ url: "mqtt://127.0.0.1:1883", privateKey, maxPerCall: "0.01", maxTotal: "1" });
-try {
-  const { reading, settlement } = await buyer.buy("mac/battery/temperature");
-} finally {
-  await buyer.close();
-}
-```
+Base is the default. Buyers pay in Base USDC.
 
 ### Solana
-
-Sell on Solana:
 
 ```bash
 npx @cultos/x402-mqtt@0.2.0 sell --mac --network solana --payout YOUR_SOLANA_ADDRESS
 ```
 
-Buy a reading in another terminal:
+Buyers pay in Solana USDC. The buyer and payout wallets need existing USDC token accounts. The facilitator sponsors settlement fees.
 
-```bash
-npx @cultos/x402-mqtt@0.2.0 buy mac/cpu/load --network solana --max 0.001
-```
-
-Load the buyer's base58-encoded 64-byte keypair into `X402_MQTT_BUYER_KEY`. The buyer and payout wallets need USDC token accounts; the buyer needs enough USDC for the purchase. The facilitator sponsors settlement fees.
-
-To accept both Base and Solana:
+### Accept both
 
 ```bash
 npx @cultos/x402-mqtt@0.2.0 sell --mac --payout 0xYourAddress --solana-payout YOUR_SOLANA_ADDRESS
 ```
 
-Devices keep publishing the same readings. Buyers choose the payment network. In code, import `SOLANA_NETWORK` and pass it as `network` to `createBuyer`.
+One seller, the same readings, two payment options. Buyers choose their network.
 
-RPC defaults are built in. Custom endpoints and config-file fields are covered in [configuration](SPEC.md#configuration).
+The built-in broker starts automatically. Payments go directly to your payout address; the seller holds no wallet key.
 
-## How it works
+## Buy a reading
 
-1. The buyer asks on `x402/v1/req/<topic>` and gets a standard x402 `402` quote.
-2. It signs one exact USDC authorization and asks again with it.
-3. The bridge verifies the payment, makes sure it has a fresh reading, settles, and only then replies with the reading and the transaction.
+Load `X402_MQTT_BUYER_KEY` into your local environment using the key for your chosen network. Fund that wallet with USDC.
 
-An offline device or invalid payment is refused before settlement. A settlement timeout can still mean a payment landed: the seller keeps it pending and checks the chain. Retry the same request and payment to recover its saved reading. The full protocol is in [SPEC.md](SPEC.md); it reuses x402's `PaymentRequired`, `PaymentPayload` and `SettleResponse`.
+**Base**
 
-### Recover a purchase
+```bash
+npx @cultos/x402-mqtt@0.2.0 buy mac/cpu/load --max 0.001
+```
 
-If a CLI purchase is pending, rerun the same command. It resumes the original payment and retrieves its saved reading. Recovery records stay on your machine and contain no keys or signatures.
+**Solana**
 
-Library callers use `buyer.resume(error.request)` after a `PurchasePendingError`. See [recovery](SPEC.md#recovery) for persistence and expiry handling.
+```bash
+npx @cultos/x402-mqtt@0.2.0 buy mac/cpu/load --network solana --max 0.001
+```
 
-## Sell any device
+Solana buyers use a base58-encoded 64-byte keypair. `--max` limits the purchase price in USDC.
 
-Anything that publishes to MQTT can sell. Point the device at `raw/<topic>` and list the topic:
+If a purchase is pending, rerun the same command. It resumes the original payment and retrieves its saved reading.
+
+## Linux and Android
+
+| Device | Readings | Setup |
+| --- | --- | --- |
+| Mac | Battery, power, CPU, memory and thermal readings | Built in with `--mac` |
+| Linux | Uptime, CPU load and memory usage | [Linux collector](docs/devices.md#linux-server) |
+| Android | Battery temperature and three-hour pressure change | [Termux collector](docs/devices.md#android-phone) |
+
+Linux and Android collectors publish to your MQTT broker. List their topics and prices in the seller configuration. Either device can sell through Base, Solana or both.
+
+Any other device can do the same. Publish to `raw/<topic>` and add an offer to `x402-mqtt.json`:
 
 ```json
 {
   "payout": "0xYourAddress",
-  "offers": [{ "topic": "garden/soil/moisture", "price": "0.002", "unit": "%" }]
+  "offers": [
+    { "topic": "garden/soil/moisture", "price": "0.002", "unit": "%" }
+  ]
 }
 ```
 
-Save it as `x402-mqtt.json` and run `x402-mqtt sell`. New purchases require a fresh reading; `maxAgeSeconds` defaults to 30. Recovery returns the original saved reading.
+Run `x402-mqtt sell` to serve those offers. See the [device guide](docs/devices.md) for the reading format and collector setup.
 
-Examples for a Mac, a Linux server and an Android phone: [docs/devices.md](docs/devices.md).
+## How it works
 
-## Works with Mosquitto
+1. The buyer requests a topic and receives an x402 quote.
+2. It signs a payment for the selected network.
+3. The bridge verifies payment, retains a fresh reading, settles, and returns the reading with its receipt.
 
-Already running a broker? Set `"broker"` to it with the bridge's username and password (`mqtts://` or `wss://` unless it runs on the same machine), and use the access rules in [examples/mosquitto](examples/mosquitto): buyers can only ask and read their own replies, and only the bridge can read `raw/#`. The evidence was collected on Mosquitto 2.1.2.
+An offline device is refused before settlement. Interrupted purchases recover the original saved reading using the same payment.
 
-## Safety notes
+Already running Mosquitto? Connect the bridge to your broker and use the [example access rules](examples/mosquitto).
 
-- **Sellers hold no keys,** only a payout address. The facilitator key lives in the bridge and is never logged.
-- **Readings retained before settlement.** Lost replies can be recovered using the same request and payment. Uncertain settlements stay pending until the exact payment is confirmed.
-- **Idempotent payments.** Retrying the same request and payment returns its saved result without another settlement. Reusing a payment for a different request or topic is refused.
-- **Private data stays private.** Raw readings and other buyers' replies are blocked at the broker, and the built-in broker only accepts requests that reply to the sender itself.
-- **Floods stay cheap.** Forged and unfunded payments are refused before they reach the facilitator. A wallet only earns a higher limit after it pays, and new buyers can't be locked out by a flood of fake IDs.
-- **Buyers have caps,** per call and in total, held even when buys run in parallel. Sent payments count as spent until confirmed unused after expiry, whatever the seller replies. A failed checkpoint sends no payment and releases its reservation. Caps cover one buyer instance, not restarts.
-- **TLS for remote brokers.** The buyer and the seller refuse plain `mqtt://` or `ws://` to anything but localhost unless you pass `--allow-cleartext`.
-- **USDC only.** Base and Solana buyers accept only canonical USDC, so their caps mean dollars. Solana supports ordinary keypair transfers; smart wallets, lookup tables and durable nonces are refused.
+The [SPEC](SPEC.md) covers configuration, spending caps, safety and recovery.
 
-## Upgrading from 0.1.x
+## From an agent
 
-Existing Base configuration works as before. Add a Solana payout to accept it alongside Base. Operators can find ledger and rollback details in [upgrade notes](SPEC.md#upgrade-notes).
+```ts
+import { createBuyer } from "@cultos/x402-mqtt";
 
-## Datasets
+const buyer = await createBuyer({
+  url: "mqtt://127.0.0.1:1883",
+  privateKey,
+  maxPerCall: "0.001",
+  maxTotal: "1",
+});
 
-[dataset/](dataset): initial runs as JSONL and CSV, with checksums.
+try {
+  const { reading, settlement } = await buyer.buy("mac/cpu/load");
+} finally {
+  await buyer.close();
+}
+```
+
+Base is the default. For Solana, import `SOLANA_NETWORK` and pass it as `network`, using your Solana keypair.
+
+## Upgrading
+
+Existing Base configuration remains valid. Add a Solana payout to accept both networks.
+
+See [upgrade notes](SPEC.md#upgrade-notes) for ledger preservation and rollback.
 
 ## From source
 
 ```bash
-git clone https://github.com/thesmithdao/x402-mqtt && cd x402-mqtt
-npm install && npm run build
-node dist/cli.js sell --mac --payout 0xYourAddress
+git clone https://github.com/thesmithdao/x402-mqtt
+cd x402-mqtt
+npm ci
+npm run build
 ```
 
-Node 20 or newer. MIT license. Built by [Cult OS](https://cultos.dev).
+Node 20 or newer. MIT license.
+
+## Try it live
+
+Three machines sell readings at [cultos.dev/machines](https://www.cultos.dev/machines).
+
+The public fleet currently accepts Base. With `X402_MQTT_BUYER_KEY` loaded and a little Base USDC:
+
+```bash
+npx @cultos/x402-mqtt@0.2.0 buy machine01/uptime --broker wss://machines.cultos.dev/mqtt --max 0.001
+```
+
+Built by [Cult OS](https://cultos.dev).
