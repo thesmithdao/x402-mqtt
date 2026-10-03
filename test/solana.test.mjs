@@ -25,7 +25,7 @@ async function fixture(t, options = {}) {
   const key = getBase58Decoder().decode(Uint8Array.from([...seed, ...publicBytes]));
   const fee = await createKeyPairSignerFromPrivateKeyBytes(randomBytes(32));
   const recipient = await createKeyPairSignerFromPrivateKeyBytes(randomBytes(32));
-  const state = { verify: 0, settle: 0, txs: new Map(), rows: [], funded: true, valid: true, historyDown: false, wrongCluster: false, ...options };
+  const state = { verify: 0, settle: 0, calls: [], mintClosed: 0, mintClosures: [], mintReleases: [], txs: new Map(), rows: [], funded: true, valid: true, historyDown: false, wrongCluster: false, ...options };
   const mint = Buffer.alloc(82);
   mint[44] = 6;
   mint[45] = 1;
@@ -33,6 +33,8 @@ async function fixture(t, options = {}) {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const call = JSON.parse(Buffer.concat(chunks));
+    state.calls.push(call.method);
+    if (call.method === "getGenesisHash" && state.genesisDelay) await new Promise(resolve => setTimeout(resolve, state.genesisDelay));
     if (state.disconnect) { request.socket.destroy(); return; }
     if (state.malformedRpc) { response.end("invalid JSON"); return; }
     if (state.rpcStatus) { response.writeHead(state.rpcStatus); response.end(); return; }
@@ -48,11 +50,23 @@ async function fixture(t, options = {}) {
     else if (call.method === "getTransaction") result = state.txs.get(call.params[0]) ?? null;
     else if (call.method === "getSignaturesForAddress") result = state.rows;
     else { response.writeHead(500); response.end(); return; }
+    if (call.method === "getAccountInfo" && state.mintMode) {
+      if (["headers", "body"].includes(state.mintMode)) {
+        const body = JSON.stringify({ jsonrpc: "2.0", id: call.id, result });
+        const prefix = state.mintMode === "body" ? body.slice(0, 32) : "";
+        state.mintClosures.push(new Promise(resolve => response.on("close", () => { state.mintClosed++; resolve(); })));
+        if (prefix) { response.setHeader("content-type", "application/json"); response.write(prefix); }
+        state.mintReleases.push((valid = true) => { if (!response.writableEnded) response.end(valid ? body.slice(prefix.length) : "invalid"); });
+        return;
+      }
+      if (state.mintMode === "malformed") { response.end("invalid JSON"); return; }
+      if (state.mintMode === "503") { response.writeHead(503); response.end(); return; }
+    }
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify(state.historyDown && call.method === "getSignaturesForAddress" ? { jsonrpc: "2.0", id: call.id, error: { code: -1, message: "unavailable" } } : { jsonrpc: "2.0", id: call.id, result }));
   });
   await new Promise(resolve => rpcServer.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise(resolve => rpcServer.close(resolve)));
+  t.after(() => { rpcServer.closeAllConnections(); return new Promise(resolve => rpcServer.close(resolve)); });
   const rpc = `http://127.0.0.1:${rpcServer.address().port}`;
   const path = join(mkdtempSync(join(tmpdir(), "mqtt-solana-test-")), "ledger.jsonl");
   const accept = { scheme: "exact", network: SOLANA_NETWORK, amount: "1000", asset: SOLANA_USDC, payTo: recipient.address, maxTimeoutSeconds: 120, extra: { feePayer: fee.address } };
@@ -260,8 +274,9 @@ test("a blockhash absent from finalized state is not proof of unused expiry", as
   assert.equal(await chain.expiredUnused(proof, f.payer.address), false);
 });
 
-test("optional Solana RPC outage keeps Base quotes available without advertising Solana", async t => {
+test("configured quotes survive a Solana outage and purchases recover without restart", async t => {
   const f = await fixture(t);
+  const payment = await f.sign();
   f.state.rpcStatus = 503;
   const ledger = new Ledger(f.path);
   ledger.append({ id: "pending", topic: "sensor", state: "pending", key: "solana-pending", network: SOLANA_NETWORK, payer: f.payer.address, reading: { value: 42, ts: Date.now() }, solana: { messageHash: "pending", source: f.payer.address, destination: f.recipient.address, blockhash: f.recipient.address, slot: 1 } });
@@ -269,25 +284,40 @@ test("optional Solana RPC outage keeps Base quotes available without advertising
   const warnings = [];
   seller.on("warning", message => warnings.push(message));
   await seller.start();
-  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453"]);
-  const reply = (await seller.handle("sensor", Buffer.from(JSON.stringify({ id: "quote", replyTo: "x402/v1/res/test/quote" })))).reply;
+  const networks = ["eip155:8453", SOLANA_NETWORK];
+  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), networks);
+  const ask = async payment => (await seller.handle("sensor", Buffer.from(JSON.stringify({ id: "quote", replyTo: "x402/v1/res/test/quote", ...(payment ? { "x402/payment": payment } : {}) })))).reply;
+  const calls = f.state.calls.length;
+  const reply = await ask();
   assert.equal(reply.status, 402);
-  assert.deepEqual(reply.paymentRequired.accepts.map(item => item.network), ["eip155:8453"]);
-  assert.deepEqual(warnings, ["Solana RPC unavailable; serving Base only. Restart after recovery."]);
+  assert.deepEqual(reply.paymentRequired.accepts.map(item => item.network), networks);
+  assert.deepEqual(await ask(), reply);
+  assert.equal(f.state.calls.length, calls);
+  assert.deepEqual(warnings, ["Solana RPC unavailable; retrying on the next Solana purchase."]);
   assert.equal(ledger.pending().length, 1);
   assert.equal(f.state.verify, 0);
   assert.equal(f.state.settle, 0);
   for (const status of [408, 429, 500]) {
     f.state.rpcStatus = status;
-    const unavailable = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
-    await unavailable.start();
-    assert.deepEqual(unavailable.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453"]);
+    assert.equal((await ask(payment)).status, 503);
+    assert.equal(f.state.verify, 0);
+    assert.equal(f.state.settle, 0);
+    assert.equal(ledger.all().length, 1);
   }
   f.state.rpcStatus = undefined;
-  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453"]);
-  const restarted = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
-  await restarted.start();
-  assert.deepEqual(restarted.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453", SOLANA_NETWORK]);
+  f.state.wrongCluster = true;
+  assert.equal((await ask(payment)).status, 503);
+  assert.equal(f.state.verify, 0);
+  f.state.wrongCluster = false;
+  const paid = await ask(payment);
+  assert.equal(paid.status, 200);
+  assert.equal(f.state.settle, 1);
+  f.state.rpcStatus = 503;
+  const settledCalls = f.state.calls.length;
+  assert.deepEqual(await ask(payment), paid);
+  assert.equal(f.state.calls.length, settledCalls);
+  assert.equal(f.state.settle, 1);
+  assert.deepEqual(await ask(), reply);
 });
 
 test("optional Solana authentication and cluster mismatches still refuse startup", async t => {
@@ -305,9 +335,6 @@ test("optional Solana authentication and cluster mismatches still refuse startup
   f.state.wrongCluster = true;
   const seller = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
   await assert.rejects(seller.start(), /network mismatch/);
-  f.state.wrongCluster = false;
-  f.state.rpcStatus = 503;
-  await assert.rejects(f.makeSeller().start(), /Solana RPC unavailable/);
   assert.equal(f.state.verify, 0);
   assert.equal(f.state.settle, 0);
 });
@@ -331,9 +358,82 @@ test("optional Solana connection loss keeps Base available", async t => {
   f.state.disconnect = true;
   const seller = f.makeSeller({ network: "eip155:8453", payTo: "0x000000000000000000000000000000000000dEaD", solanaPayout: f.recipient.address, solanaRpcUrl: f.rpc });
   await seller.start();
-  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453"]);
+  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), ["eip155:8453", SOLANA_NETWORK]);
   assert.equal(f.state.verify, 0);
   assert.equal(f.state.settle, 0);
+});
+
+test("a Solana-only seller starts during an outage and validates the recovered RPC", async t => {
+  const f = await fixture(t);
+  const payment = await f.sign();
+  f.state.rpcStatus = 503;
+  const seller = f.makeSeller();
+  await seller.start();
+  assert.deepEqual(seller.catalog().offers[0].accepts.map(item => item.network), [SOLANA_NETWORK]);
+  const ask = async () => (await seller.handle("sensor", Buffer.from(JSON.stringify({ id: "request", replyTo: "x402/v1/res/test/request", "x402/payment": payment })))).reply;
+  assert.equal((await ask()).status, 503);
+  for (const status of [401, 403]) {
+    f.state.rpcStatus = status;
+    assert.equal((await ask()).status, 503);
+  }
+  f.state.rpcStatus = undefined;
+  f.state.malformedRpc = true;
+  assert.equal((await ask()).status, 503);
+  assert.equal(f.state.verify, 0);
+  assert.equal(f.state.settle, 0);
+  f.state.malformedRpc = false;
+  assert.equal((await ask()).status, 200);
+  assert.equal(f.state.settle, 1);
+});
+
+test("a known Solana buyer cannot bypass an outage or a recovered wrong cluster", async t => {
+  const f = await fixture(t);
+  assert.equal((await f.ask(await f.sign())).status, 200);
+  const payment = await f.sign();
+  f.state.rpcStatus = 503;
+  assert.equal((await f.ask(payment, "second")).status, 503);
+  f.state.rpcStatus = undefined;
+  f.state.wrongCluster = true;
+  assert.equal((await f.ask(payment, "second")).status, 503);
+  assert.equal(f.state.verify, 1);
+  assert.equal(f.state.settle, 1);
+  f.state.wrongCluster = false;
+  assert.equal((await f.ask(payment, "second")).status, 200);
+  assert.equal(f.state.settle, 2);
+});
+
+test("pending Solana purchases reconcile after starting with the RPC offline", async t => {
+  const f = await fixture(t, { drop: true, historyDown: true });
+  const payment = await f.sign();
+  assert.equal((await f.ask(payment)).status, 503);
+  f.state.rpcStatus = 503;
+  const seller = f.makeSeller({ readings: () => undefined });
+  await seller.start();
+  const ask = async () => (await seller.handle("sensor", Buffer.from(JSON.stringify({ id: "request", replyTo: "x402/v1/res/test/request", "x402/payment": payment })))).reply;
+  assert.equal((await ask()).status, 503);
+  assert.equal(new Ledger(f.path).pending().length, 1);
+  f.state.rpcStatus = undefined;
+  f.state.historyDown = false;
+  const reply = await ask();
+  assert.equal(reply.status, 200);
+  assert.equal(reply.result.value, 42);
+  assert.equal(f.state.verify, 1);
+  assert.equal(f.state.settle, 1);
+});
+
+test("concurrent Solana purchases share cluster validation after an outage", async t => {
+  const f = await fixture(t);
+  const payments = await Promise.all([f.sign(), f.sign()]);
+  f.state.rpcStatus = 503;
+  const seller = f.makeSeller();
+  await seller.start();
+  f.state.rpcStatus = undefined;
+  f.state.genesisDelay = 30;
+  const before = f.state.calls.filter(method => method === "getGenesisHash").length;
+  const replies = await Promise.all(payments.map((payment, i) => seller.handle("sensor", Buffer.from(JSON.stringify({ id: `r${i}`, replyTo: `x402/v1/res/test/r${i}`, "x402/payment": payment })))));
+  assert.deepEqual(replies.map(result => result.reply.status), [200, 200]);
+  assert.equal(f.state.calls.filter(method => method === "getGenesisHash").length, before + 1);
+  assert.equal(f.state.settle, 2);
 });
 
 test("Solana config is explicit and corrupt ledgers refuse startup", async t => {
@@ -355,6 +455,96 @@ async function localBuyer(t, f, overrides = {}) {
   t.after(async () => { await buyer.close(); await bridge.close(); await broker.close(); });
   return buyer;
 }
+
+test("Solana RPC aborts a stalled body during garbage collection", async () => {
+  await promisify(execFile)(process.execPath, ["--expose-gc", "test/fixtures/rpc-timeout.mjs", new URL("../dist/solana.js", import.meta.url).href], { timeout: 10_000 });
+});
+
+for (const mode of ["headers", "body"]) {
+  test(`Solana preparation bounds stalled mint ${mode} and discards late payments`, async t => {
+    const f = await fixture(t, { mintMode: mode });
+    let prepared = 0;
+    const buyer = await localBuyer(t, f, { onPrepared: () => { prepared++; } });
+    const started = performance.now();
+    const purchases = Promise.allSettled(Array.from({ length: 3 }, () => buyer.buy("sensor")));
+    let watchdog;
+    try {
+      const results = await Promise.race([purchases, new Promise(resolve => { watchdog = setTimeout(() => resolve(undefined), 12_000); })]);
+      assert.ok(results, "preparation did not return within its deadline");
+      assert.ok(performance.now() - started < 12_000);
+      assert.ok(results.every(result => result.status === "rejected" && /preparation timed out; no payment sent/.test(result.reason.message)));
+      assert.equal(prepared, 0);
+      assert.equal(f.state.verify, 0);
+      assert.equal(f.state.settle, 0);
+      assert.equal(new Ledger(f.path).all().length, 0);
+      assert.equal(f.state.calls.filter(method => method === "getAccountInfo").length, 1);
+      const calls = f.state.calls.length;
+      const quote = await buyer.quote("sensor");
+      for (let i = 0; i < 20; i++) await assert.rejects(buyer.sign(quote.paymentRequired), /preparation still pending/);
+      assert.equal(f.state.calls.length, calls);
+      const healthy = await fixture(t);
+      const independent = await localBuyer(t, healthy, { maxTotal: "0.001" });
+      assert.equal((await independent.buy("sensor")).amount, "1000");
+      f.state.mintMode = undefined;
+      for (const release of f.state.mintReleases) release(mode === "headers");
+      await new Promise(resolve => setTimeout(resolve, 150));
+      assert.equal(prepared, 0);
+      assert.equal(f.state.verify, 0);
+      assert.equal(f.state.settle, 0);
+      const recovered = await Promise.all(Array.from({ length: 3 }, () => buyer.buy("sensor")));
+      assert.equal(new Set(recovered.map(purchase => purchase.settlement.transaction)).size, 3);
+      assert.equal(prepared, 3);
+      assert.equal(f.state.settle, 3);
+      await assert.rejects(buyer.buy("sensor"), SpendCapError);
+    } finally {
+      clearTimeout(watchdog);
+      for (const release of f.state.mintReleases) release();
+      await purchases;
+    }
+  });
+}
+
+for (const mode of ["malformed", "503"]) {
+  test(`Solana mint ${mode} failure releases the preparation reservation`, async t => {
+    const f = await fixture(t, { mintMode: mode });
+    let prepared = 0;
+    const buyer = await localBuyer(t, f, { maxTotal: "0.001", onPrepared: () => { prepared++; } });
+    await assert.rejects(buyer.buy("sensor"), /^Error: Solana payment preparation failed; no payment sent$/);
+    assert.equal(prepared, 0);
+    assert.equal(f.state.verify, 0);
+    assert.equal(f.state.settle, 0);
+    f.state.mintMode = undefined;
+    assert.equal((await buyer.buy("sensor")).amount, "1000");
+    assert.equal(f.state.settle, 1);
+    await assert.rejects(buyer.buy("sensor"), SpendCapError);
+  });
+}
+
+test("CLI preparation timeout exits without a checkpoint; the next invocation pays once", async t => {
+  const f = await fixture(t, { mintMode: "body" });
+  await localBuyer(t, f);
+  const cache = mkdtempSync(join(tmpdir(), "mqtt-cli-preparation-"));
+  const env = { ...process.env, X402_MQTT_BUYER_KEY: f.key, XDG_CACHE_HOME: cache };
+  const args = ["dist/cli.js", "buy", "sensor", "--network", "solana", "--broker", f.buyerUrl, "--rpc", f.rpc, "--max", "0.001"];
+  const run = promisify(execFile);
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15_000 }), error => !error.killed && error.code === 1 && /preparation timed out; no payment sent/.test(error.stderr));
+  const checkpoints = () => readdirSync(cache, { recursive: true }).filter(name => name.endsWith(".json"));
+  assert.deepEqual(checkpoints(), []);
+  assert.equal(f.state.verify, 0);
+  assert.equal(f.state.settle, 0);
+  assert.equal(f.state.mintClosures.length, 1);
+  let timer;
+  try {
+    await Promise.race([Promise.all(f.state.mintClosures), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("CLI left the RPC connection open")), 1000); })]);
+  } finally { clearTimeout(timer); }
+  assert.equal(f.state.mintClosed, 1);
+  f.state.mintMode = undefined;
+  for (const release of f.state.mintReleases) release();
+  const result = await run(process.execPath, args, { env, timeout: 13_000 });
+  assert.match(result.stdout, /paid \$0\.001/);
+  assert.deepEqual(checkpoints(), []);
+  assert.equal(f.state.settle, 1);
+});
 
 test("Solana buyer enforces concurrent caps and confirms its receipt", async t => {
   const f = await fixture(t);

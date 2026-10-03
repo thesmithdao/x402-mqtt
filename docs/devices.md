@@ -1,6 +1,6 @@
 # Sell readings from any device
 
-Any device that publishes JSON to `raw/<topic>` can sell with x402-mqtt. Publish at least every 30 seconds, or the reading counts as offline:
+Any device that publishes JSON to `raw/<topic>` can sell with x402-mqtt. New purchases require a sample younger than `maxAgeSeconds`, which defaults to 30. Publish more often than that to leave room for delivery delays:
 
 ```json
 { "value": 0.42, "unit": "load", "ts": 1790640000000 }
@@ -9,10 +9,13 @@ Any device that publishes JSON to `raw/<topic>` can sell with x402-mqtt. Publish
 Then list the topics in the seller's `x402-mqtt.json` and run `x402-mqtt sell`:
 
 ```json
-{ "offers": [{ "topic": "server/cpu/load", "price": "0.001", "unit": "load" }] }
+{
+  "payout": "0xYourAddress",
+  "offers": [{ "topic": "server/cpu/load", "price": "0.001", "unit": "load" }]
+}
 ```
 
-A Linux server and an Android phone run live on [cultos.dev/machines](https://www.cultos.dev/machines). The Mac runs are in [EVIDENCE.md](../EVIDENCE.md).
+Two Linux servers and an Android phone sell readings on Base at [cultos.dev/machines](https://www.cultos.dev/machines). The Mac runs are in [EVIDENCE.md](../EVIDENCE.md). Devices publish the same JSON for either payment network; configure Base, Solana or both on the seller as shown in [README.md](../README.md#solana).
 
 ## Mac
 

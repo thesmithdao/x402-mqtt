@@ -83,6 +83,8 @@ export async function createBuyer(options: BuyerOptions) {
   const reservations = new Map<string, Promise<void>>();
   const resuming = new Set<string>();
   let spent = 0n;
+  let preparations = 0;
+  let preparationTimedOut = false;
 
   const client = await mqtt.connectAsync(options.url, { clientId, clean: true, reconnectPeriod: 2000 });
   client.on("message", (topic, payload) => {
@@ -181,17 +183,39 @@ export async function createBuyer(options: BuyerOptions) {
     finally { reservations.delete(identity); }
   }
 
+  async function prepare(paymentRequired: PaymentRequired): Promise<PaymentPayload> {
+    if (!isSolana) return payer.createPaymentPayload(paymentRequired);
+    if (preparationTimedOut) throw new Error("Solana payment preparation still pending; no payment sent");
+    preparations++;
+    const pending = payer.createPaymentPayload(paymentRequired)
+      .catch(() => { throw new Error("Solana payment preparation failed; no payment sent"); })
+      .finally(() => { if (--preparations === 0) preparationTimedOut = false; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            preparationTimedOut = true;
+            reject(new Error("Solana payment preparation timed out; no payment sent"));
+          }, 10_000);
+        }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+
   async function sign(paymentRequired: PaymentRequired): Promise<{ payment: PaymentPayload; amount: bigint }> {
     if (paymentRequired?.x402Version !== 2 || !Array.isArray(paymentRequired.accepts)) throw new Error("invalid quote");
     const accept = paymentRequired.accepts.find(item => item.scheme === "exact" && item.network === network);
     if (!accept) throw new Error(`no ${network} option in the quote`);
     const amount = checkTerms(accept);
+    if (preparationTimedOut) throw new Error("Solana payment preparation still pending; no payment sent");
     await reserve(amount);
     let payment: PaymentPayload;
     try {
       const blockhash = solana ? await solana.latestBlockhash() : undefined;
       const terms = isSolana ? { ...accept, extra: { ...accept.extra, recentBlockhash: blockhash!.blockhash, lastValidBlockHeight: String(blockhash!.lastValidBlockHeight) } } : accept;
-      payment = await payer.createPaymentPayload({ ...paymentRequired, accepts: [terms] });
+      payment = await prepare({ ...paymentRequired, accepts: [terms] });
       if (solana) {
         const proof = await inspectSolana(payment, terms);
         if (proof.blockhash !== blockhash!.blockhash) throw new Error("Solana blockhash mismatch");

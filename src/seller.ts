@@ -79,6 +79,7 @@ export class Seller extends EventEmitter {
   private chain;
   private solana?: SolanaChain;
   private solanaReady = false;
+  private solanaInitializing?: Promise<void>;
 
   constructor(private readonly options: SellerOptions) {
     super();
@@ -100,8 +101,8 @@ export class Seller extends EventEmitter {
     await this.server.initialize();
     this.solanaReady = false;
     if (this.solana) {
-      try { await this.solana.initialize(); this.solanaReady = true; }
-      catch (error) { if (this.options.network === SOLANA_NETWORK || !(error instanceof SolanaRpcUnavailableError)) throw error; }
+      try { await this.initializeSolana(); }
+      catch (error) { if (!(error instanceof SolanaRpcUnavailableError)) throw error; }
     }
     for (const offer of this.options.offers) {
       const accepts = await this.server.buildPaymentRequirements({
@@ -115,10 +116,10 @@ export class Seller extends EventEmitter {
         accepts.push(...await this.server.buildPaymentRequirements({ scheme: "exact", payTo: this.options.solanaPayout, price: { asset: SOLANA_USDC, amount: accepts[0].amount }, network: SOLANA_NETWORK, maxTimeoutSeconds: 120 }));
       }
       if (accepts.some(item => item.network === SOLANA_NETWORK && !validateSvmAddress(String(item.extra?.feePayer ?? "")))) throw new Error("facilitator did not advertise a Solana fee payer");
-      this.requirements.set(offer.topic, accepts.filter(item => this.solanaReady || item.network !== SOLANA_NETWORK));
+      this.requirements.set(offer.topic, accepts);
     }
     this.quoteCache.clear();
-    if (this.solana && !this.solanaReady) this.emit("warning", "Solana RPC unavailable; serving Base only. Restart after recovery.");
+    if (this.solana && !this.solanaReady) this.emit("warning", "Solana RPC unavailable; retrying on the next Solana purchase.");
     await this.recover();
   }
 
@@ -222,11 +223,23 @@ export class Seller extends EventEmitter {
       ownsRequest = true;
       if (!this.limit(this.payers, `${matched.network}:${payer}`, perPayer)) return reply(429, { error: "too many requests, not charged" });
       if (!known && !budgeted && !this.take(this.unknownPayers, this.options.paymentsPerMinute ?? 300)) return reply(429, { error: "too many requests, not charged" });
+      if (svm) {
+        try {
+          await this.initializeSolana();
+          svm.slot = await this.solana!.context();
+        } catch {
+          this.solanaReady = false;
+          return reply(503, { error: "chain unavailable, not charged" });
+        }
+      }
       if (!known) {
         let balance: bigint;
         try {
           balance = svm ? await this.solana!.balance(svm.source) : await this.chain.readContract({ address: matched.asset as Address, abi: usdcAbi, functionName: "balanceOf", args: [authorization!.from] });
-        } catch { return reply(503, { error: "chain unavailable, not charged" }); }
+        } catch {
+          if (svm) this.solanaReady = false;
+          return reply(503, { error: "chain unavailable, not charged" });
+        }
         if (balance < BigInt(matched.amount)) {
           this.record({ ...base, state: "rejected", error: "insufficient balance" });
           return reply(400, { error: "insufficient balance" });
@@ -249,9 +262,6 @@ export class Seller extends EventEmitter {
         return reply(503, { error: "device offline, not charged" });
       }
 
-      if (svm) {
-        try { svm.slot = await this.solana!.context(); } catch { return reply(503, { error: "chain unavailable, not charged" }); }
-      }
       const pending = this.options.ledger.append({ ...base, state: "verified", reading, payTo: matched.payTo, asset: matched.asset, ...(svm ? { solana: { messageHash: svm.messageHash, source: svm.source, destination: svm.destination, blockhash: svm.blockhash, slot: svm.slot } } : {}) });
       let settlement: SettleResponse | undefined;
       try {
@@ -359,12 +369,22 @@ export class Seller extends EventEmitter {
     }
   }
 
+  private async initializeSolana(): Promise<void> {
+    if (this.solanaReady) return;
+    const pending = this.solanaInitializing ??= this.solana!.initialize().then(() => { this.solanaReady = true; });
+    try { await pending; }
+    finally { if (this.solanaInitializing === pending) this.solanaInitializing = undefined; }
+  }
+
   private async reconcileEntry(entry: LedgerEntry): Promise<LedgerEntry | undefined> {
     if (!entry.key || !entry.payer || !entry.reading) return undefined;
     let settlement: SettleResponse | undefined;
     if (entry.network === SOLANA_NETWORK) {
       if (!this.solana || !entry.solana) return undefined;
-      try { settlement = (await this.solana.reconcile(entry.solana, entry.payer, entry.tx)).settlement; } catch { return undefined; }
+      try {
+        await this.initializeSolana();
+        settlement = (await this.solana.reconcile(entry.solana, entry.payer, entry.tx)).settlement;
+      } catch { this.solanaReady = false; return undefined; }
     } else {
       if (entry.network && entry.network !== this.options.network) return undefined;
       const nonce = entry.key.split(":").at(-1) as Hex;

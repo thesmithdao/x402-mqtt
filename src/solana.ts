@@ -96,9 +96,10 @@ export class SolanaChain {
   async call<T>(method: string, params: unknown[] = [], deadline = Date.now() + 10_000): Promise<T> {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new SolanaRpcUnavailableError("Solana RPC timeout");
+    const signal = AbortSignal.timeout(Math.min(remaining, 10_000));
     let response: Response;
     try {
-      response = await fetch(this.url, { method: "POST", headers: { "content-type": "application/json" }, redirect: "error", signal: AbortSignal.timeout(Math.min(remaining, 10_000)), body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+      response = await fetch(this.url, { method: "POST", headers: { "content-type": "application/json" }, redirect: "error", signal, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
     } catch (error) {
       if (error instanceof TypeError || (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name))) throw new SolanaRpcUnavailableError("Solana RPC unavailable");
       throw error;
@@ -109,11 +110,15 @@ export class SolanaChain {
       throw new Error("Solana RPC unavailable");
     }
     const reader = response.body.getReader();
+    const cancel = () => { void reader.cancel(signal.reason).catch(() => undefined); };
+    signal.addEventListener("abort", cancel, { once: true });
     const chunks: Uint8Array[] = [];
     let size = 0;
     try {
+      signal.throwIfAborted();
       for (;;) {
         const { value, done } = await reader.read();
+        signal.throwIfAborted();
         if (done) break;
         size += value.length;
         if (size > 1_048_576) throw new Error("Solana RPC response too large");
@@ -123,6 +128,7 @@ export class SolanaChain {
       if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) throw new SolanaRpcUnavailableError("Solana RPC timeout");
       throw error;
     } finally {
+      signal.removeEventListener("abort", cancel);
       await reader.cancel().catch(() => undefined);
     }
     const result = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { result?: T; error?: unknown };
