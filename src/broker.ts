@@ -66,7 +66,7 @@ export async function startBuiltInBroker(options: { host?: string; port?: number
   });
 
   return {
-    url: `mqtt://${host}:${port}`,
+    url: `mqtt://${host}:${(server.address() as net.AddressInfo).port}`,
     username,
     password,
     close: () =>
@@ -75,4 +75,3 @@ export async function startBuiltInBroker(options: { host?: string; port?: number
       }),
   };
 }
-

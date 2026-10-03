@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -10,8 +12,10 @@ import { ExactEvmScheme } from "@x402/evm/exact/client";
 import mqtt from "mqtt";
 import { encodeAbiParameters, encodeEventTopics, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { Ledger, Seller, SpendCapError, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
+import { Ledger, Seller, SpendCapError, PurchasePendingError, PurchaseExpiredError, SOLANA_NETWORK, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
 import { startPage } from "../dist/page.js";
+import { PurchaseStore } from "../dist/recovery.js";
+import { checkpointTests } from "./checkpoint.mjs";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -53,12 +57,13 @@ function fakeRpc(options = {}) {
       const call = JSON.parse(body);
       const result = item => {
         if (item.method === "eth_chainId") return "0x2105";
+        if (item.method === "eth_getBlockByNumber") return options.finalizedUnavailable ? null : { number: "0x100000", timestamp: `0x${BigInt(options.finalizedTimestamp ?? Math.floor(Date.now() / 1000)).toString(16)}`, transactions: [] };
         if (item.method === "eth_blockNumber") return "0x100000";
         if (item.method === "eth_getLogs") return options.logs ?? [];
         if (item.method === "eth_getTransactionReceipt") return options.receipt ?? null;
         const data = item.params?.[0]?.data ?? item.params?.[0]?.input ?? "";
         if (data.startsWith("0x70a08231")) return word(options.balance ?? 0n);
-        if (data.startsWith("0xe94a0102")) return word(options.used ? 1n : 0n);
+        if (data.startsWith("0xe94a0102")) { options.authorizationBlock = item.params[1]; return word(options.used ? 1n : 0n); }
         return word(options.signature ? 1n : 0n);
       };
       const answer = item => ({ jsonrpc: "2.0", id: item.id, result: result(item) });
@@ -84,9 +89,35 @@ async function fakeSeller(broker, onPaid, window = 120) {
   return client;
 }
 
+test("Base payments work while optional Solana RPC is unavailable", async t => {
+  const rpc = await fakeRpc({ balance: 1000000n });
+  t.after(() => rpc.close());
+  let solanaCalls = 0;
+  const outage = createServer((_request, response) => { solanaCalls++; response.writeHead(503); response.end(); });
+  await new Promise(resolve => outage.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => outage.close(resolve)));
+  const solanaRpcUrl = `http://127.0.0.1:${outage.address().port}`;
+  const solanaPayout = "BESFJe2NoWVHefr94deAA7C41wCmg2RW9zob11akRFSg";
+  const counter = { verify: 0 };
+  const facilitator = { ...payingFacilitator(counter), getSupported: async () => ({ kinds: [{ x402Version: 2, scheme: "exact", network: "eip155:8453" }, { x402Version: 2, scheme: "exact", network: SOLANA_NETWORK, extra: { feePayer: solanaPayout } }], extensions: [], signers: { [SOLANA_NETWORK]: [solanaPayout] } }) };
+  const baseOnly = makeSeller(counter, rpc, { facilitator, solanaRpcUrl });
+  await baseOnly.start();
+  assert.equal(solanaCalls, 0);
+  const dual = makeSeller(counter, rpc, { facilitator, solanaRpcUrl, solanaPayout });
+  await dual.start();
+  assert.equal(solanaCalls, 1);
+  const payment = await signed(dual);
+  const result = await ask(dual, payment);
+  assert.equal(result.reply.status, 200);
+  assert.equal(result.reply["x402/payment-response"].network, "eip155:8453");
+  assert.equal(counter.verify, 1);
+  assert.equal(solanaCalls, 1);
+  assert.equal(dual.options.ledger.all().at(-1).state, "settled");
+});
+
 test("concurrent buys never exceed the total cap", async () => {
   const broker = await startBuiltInBroker({ port: port() });
-  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 200, result: { value: 1, ts: Date.now() }, "x402/payment-response": { success: true, transaction: "0x1", network: "eip155:8453", payer: PAY_TO } }));
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 200, result: { value: 1, ts: Date.now() }, "x402/payment-response": { success: true, transaction: TX, network: "eip155:8453", payer: PAY_TO } }));
   const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.003" });
   try {
     const results = await Promise.allSettled(Array.from({ length: 10 }, () => buyer.buy("t")));
@@ -138,6 +169,67 @@ test("a held payment is released only after it expires unused on-chain", async (
     await seller.endAsync();
     await broker.close();
   }
+});
+
+test("Base holds spending until finalized state passes authorization expiry", async t => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503, error: "payment pending" }));
+  const rpc = await fakeRpc({ used: false, finalizedTimestamp: 1 });
+  let request;
+  const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001", rpcUrl: rpc.url, onPrepared: record => { request = record; } });
+  t.after(async () => { await buyer.close(); await seller.endAsync(); await broker.close(); rpc.close(); });
+  await assert.rejects(buyer.buy("t"), PurchasePendingError);
+  const expired = { ...request, authorization: { ...request.authorization, validAfter: "1", validBefore: "2" } };
+  const pending = error => error instanceof PurchasePendingError && !(error instanceof PurchaseExpiredError);
+  await assert.rejects(buyer.resume(expired), pending);
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+  rpc.options.finalizedTimestamp = 12;
+  await assert.rejects(buyer.resume(expired), pending);
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+  rpc.options.finalizedTimestamp = 13;
+  rpc.options.used = true;
+  await assert.rejects(buyer.resume(expired), pending);
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+  assert.equal(rpc.options.authorizationBlock, "0x100000");
+  rpc.options.used = false;
+  await assert.rejects(buyer.resume(expired), PurchaseExpiredError);
+  await assert.rejects(buyer.buy("t"), pending);
+});
+
+test("Base missing finalized state retains recovery and its spending hold", async t => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503, error: "payment pending" }));
+  const rpc = await fakeRpc({ used: false, finalizedUnavailable: true });
+  let request;
+  const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001", rpcUrl: rpc.url, onPrepared: record => { request = record; } });
+  t.after(async () => { await buyer.close(); await seller.endAsync(); await broker.close(); rpc.close(); });
+  await assert.rejects(buyer.buy("t"), PurchasePendingError);
+  const expired = { ...request, authorization: { ...request.authorization, validAfter: "1", validBefore: "2" } };
+  await assert.rejects(buyer.resume(expired), error => error instanceof PurchasePendingError && !(error instanceof PurchaseExpiredError));
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+});
+
+test("the Base CLI retains its checkpoint while finalized state lags expiry", async t => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  const seller = await fakeSeller(broker, ask => ({ id: ask.id, status: 503, error: "payment pending" }));
+  const rpc = await fakeRpc({ used: false, finalizedTimestamp: 1 });
+  const privateKey = key();
+  let request;
+  const buyer = await createBuyer({ url: broker.url, privateKey, maxPerCall: "0.001", maxTotal: "0.001", rpcUrl: rpc.url, onPrepared: record => { request = record; } });
+  t.after(async () => { await buyer.close(); await seller.endAsync(); await broker.close(); rpc.close(); });
+  await assert.rejects(buyer.buy("t"), PurchasePendingError);
+  const expired = { ...request, authorization: { ...request.authorization, validAfter: "1", validBefore: "2" } };
+  const directory = mkdtempSync(join(tmpdir(), "mqtt-base-finality-"));
+  const store = new PurchaseStore(join(directory, "x402-mqtt"), broker.url, accept.network, request.payer, "t");
+  store.save(expired);
+  const run = promisify(execFile);
+  const args = [join(process.cwd(), "dist/cli.js"), "buy", "t", "--broker", broker.url, "--network", "base", "--rpc", rpc.url, "--max", "0.001"];
+  const env = { PATH: process.env.PATH, HOME: directory, XDG_CACHE_HOME: directory, X402_MQTT_BUYER_KEY: privateKey };
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15000 }), error => /payment pending/.test(error.stderr));
+  assert.deepEqual(store.load(), expired);
+  rpc.options.finalizedTimestamp = 13;
+  await assert.rejects(run(process.execPath, args, { env, timeout: 15000 }), error => /expired unused/.test(error.stderr));
+  assert.equal(store.load(), undefined);
 });
 
 test("quotes with long payment windows are refused", async () => {
@@ -235,6 +327,86 @@ test("a real transfer to the payout for the exact amount still counts", async ()
   });
   assert.equal(handled.reply.status, 200);
   assert.equal(handled.reply["x402/payment-response"].transaction, TX);
+});
+
+checkpointTests("Base", async (t, options) => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  let payments = 0;
+  const seller = await fakeSeller(broker, request => {
+    payments++;
+    return { id: request.id, status: 200, result: { value: 42, ts: Date.now() }, "x402/payment-response": { success: true, transaction: TX, network: "eip155:8453", payer: request["x402/payment"].payload.authorization.from } };
+  });
+  const privateKey = key();
+  const buyers = [];
+  const create = async overrides => {
+    const buyer = await createBuyer({ url: broker.url, privateKey, maxPerCall: "0.001", ...overrides });
+    buyers.push(buyer);
+    return buyer;
+  };
+  t.after(async () => { for (const buyer of buyers) await buyer.close(); await seller.endAsync(); await broker.close(); });
+  return { buyer: await create(options), create, topic: "t", payments: () => payments };
+});
+
+test("Base resume signs the same authorization and preserves its original spending cap", async t => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  const seen = [];
+  let pending = true;
+  const seller = await fakeSeller(broker, request => {
+    seen.push(request);
+    return pending ? { id: request.id, status: 503, error: "payment pending" } : { id: request.id, status: 200, result: { value: 42, ts: Date.now() }, "x402/payment-response": { success: true, transaction: TX, network: "eip155:8453", payer: request["x402/payment"].payload.authorization.from } };
+  });
+  const buyer = await createBuyer({ url: broker.url, privateKey: key(), maxPerCall: "0.001", maxTotal: "0.001" });
+  t.after(async () => { await buyer.close(); await seller.endAsync(); await broker.close(); });
+  let error;
+  try { await buyer.buy("t"); } catch (value) { error = value; }
+  assert.ok(error instanceof PurchasePendingError);
+  assert.ok(!JSON.stringify(error.request).includes('"signature"'));
+  pending = false;
+  assert.equal((await buyer.resume(error.request)).reading.value, 42);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1].id, seen[0].id);
+  assert.equal(seen[1]["x402/payment"].payload.authorization.nonce, seen[0]["x402/payment"].payload.authorization.nonce);
+  assert.ok(seen[1]["x402/payment"].payload.signature === seen[0]["x402/payment"].payload.signature);
+  await assert.rejects(buyer.buy("t"), SpendCapError);
+});
+
+test("Base saved replies survive expired authorization without settling fresh expired payments", async t => {
+  const rpc = await fakeRpc({ balance: 10n ** 12n });
+  const privateKey = key();
+  const wallet = privateKeyToAccount(privateKey);
+  const counter = { verify: 0 };
+  const seller = makeSeller(counter, rpc, { facilitator: payingFacilitator(counter) });
+  await seller.start();
+  t.after(() => rpc.close());
+  const payment = await signed(seller, privateKey);
+  const original = await seller.handle("t", Buffer.from(JSON.stringify({ id: "original", replyTo: "x402/v1/res/test/original", "x402/payment": payment })));
+  assert.equal(original.reply.status, 200);
+  const authorization = { ...payment.payload.authorization, validAfter: "1", validBefore: "2" };
+  const signature = await wallet.signTypedData({ domain: { name: "USD Coin", version: "2", chainId: 8453, verifyingContract: USDC }, types: { TransferWithAuthorization: [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "validAfter", type: "uint256" }, { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" }] }, primaryType: "TransferWithAuthorization", message: { ...authorization, value: BigInt(authorization.value), validAfter: 1n, validBefore: 2n } });
+  const expired = { ...payment, payload: { authorization, signature } };
+  const replay = await seller.handle("t", Buffer.from(JSON.stringify({ id: "original", replyTo: "x402/v1/res/test/original", "x402/payment": expired })));
+  assert.equal(replay.reply.status, 200);
+  assert.deepEqual(replay.reply.result, original.reply.result);
+  assert.equal(counter.verify, 1);
+  const fresh = await signed(seller, privateKey);
+  fresh.payload.authorization.validBefore = "2";
+  assert.equal((await ask(seller, fresh)).reply.status, 400);
+});
+
+test("Base address casing cannot buy twice under the original request ID", async t => {
+  const rpc = await fakeRpc({ balance: 10n ** 12n });
+  const privateKey = key();
+  const counter = { verify: 0 };
+  const seller = makeSeller(counter, rpc, { facilitator: payingFacilitator(counter) });
+  await seller.start();
+  t.after(() => rpc.close());
+  const first = await signed(seller, privateKey);
+  const request = payment => seller.handle("t", Buffer.from(JSON.stringify({ id: "original", replyTo: "x402/v1/res/test/original", "x402/payment": payment })));
+  assert.equal((await request(first)).reply.status, 200);
+  const replacement = await signed(seller, privateKey);
+  replacement.payload.authorization.from = replacement.payload.authorization.from.toLowerCase();
+  assert.equal((await request(replacement)).reply.status, 409);
+  assert.equal(counter.verify, 1);
 });
 
 test("the seller never talks cleartext to a remote broker", async () => {
@@ -368,7 +540,7 @@ test("buyers refuse networks without a known USDC", async () => {
 
 test("a malformed reading from the seller is rejected", async () => {
   const broker = await startBuiltInBroker({ port: port() });
-  const seller = await fakeSeller(broker, request => ({ id: request.id, status: 200, result: { value: { evil: true }, ts: Date.now() }, "x402/payment-response": { success: true, transaction: "0x1", network: "eip155:8453", payer: PAY_TO } }));
+  const seller = await fakeSeller(broker, request => ({ id: request.id, status: 200, result: { value: { evil: true }, ts: Date.now() }, "x402/payment-response": { success: true, transaction: TX, network: "eip155:8453", payer: PAY_TO } }));
   const buyer = await createBuyer({ url: broker.url, privateKey: key() });
   try {
     await assert.rejects(buyer.buy("t"), /malformed/);

@@ -51,7 +51,7 @@ async function main() {
     const buyer = buyers[index % 2];
     const purchase = await buyer.buy(topic);
     timings.push(purchase.ms);
-    const ok = await transferred(purchase.settlement.transaction as Hex, buyer.address, BigInt(purchase.amount));
+    const ok = await transferred(purchase.settlement.transaction as Hex, buyer.address as Address, BigInt(purchase.amount));
     record({
       scenario: `Paid reading · ${topic}`,
       expected: "reading delivered, exactly $0.001 moved on-chain",
@@ -72,7 +72,7 @@ async function main() {
       scenario: "Replay a used payment",
       expected: "second use rejected, no second charge",
       result: `first ${first.status}, replay ${replay.status} ${replay.error ?? ""}`.trim(),
-      pass: first.status === 200 && replay.status === 409 && (await transferred(tx as Hex, one.address, 1000n)),
+      pass: first.status === 200 && replay.status === 409 && (await transferred(tx as Hex, one.address as Address, 1000n)),
       proof: [link(tx)],
     });
   }
@@ -94,7 +94,7 @@ async function main() {
     await new Promise(resolve => setTimeout(resolve, 5_000));
     await raw.endAsync();
     const settledTx = [...new Set(replies.flatMap(reply => (reply.status === 200 && reply[PAYMENT_RESPONSE_KEY] ? [reply[PAYMENT_RESPONSE_KEY].transaction] : [])))];
-    const onChain = settledTx.length === 1 ? await transferred(settledTx[0] as Hex, two.address, 1000n) : false;
+    const onChain = settledTx.length === 1 ? await transferred(settledTx[0] as Hex, two.address as Address, 1000n) : false;
     record({
       scenario: "Same request delivered three times (MQTT redelivery)",
       expected: "one settlement; repeats get the same receipt or an in-progress refusal",
@@ -114,7 +114,7 @@ async function main() {
       scenario: "One payment, two requests at once",
       expected: "one delivered, the other refused, one charge",
       result: [a.status, b.status].sort().join(" + "),
-      pass: [a.status, b.status].sort().join(",") === "200,409" && (await transferred(tx as Hex, one.address, 1000n)),
+      pass: [a.status, b.status].sort().join(",") === "200,409" && (await transferred(tx as Hex, one.address as Address, 1000n)),
       proof: [link(tx)],
     });
   }

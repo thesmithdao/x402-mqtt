@@ -45,7 +45,7 @@
   <text x="454" y="396" fill="#8f8f89" font-size="11">Coinbase or any x402</text>
 
   <rect x="700" y="352" width="236" height="60" rx="6" fill="#181817" stroke="#4b4b47"/>
-  <text x="714" y="376" fill="#e6e6e3" font-size="13" font-weight="600">Base</text>
+  <text x="714" y="376" fill="#e6e6e3" font-size="13" font-weight="600">Base / Solana</text>
   <text x="714" y="396" fill="#8f8f89" font-size="11">USDC → seller payout</text>
 
   <path d="M194,154 H226" stroke="#bdbdb7" stroke-width="1.4" fill="none" marker-end="url(#a)"/>

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Ledger } from "./ledger.js";
+import { isTestBuyer } from "./networks.js";
 
 export type DatasetRow = {
   time: string;
@@ -26,7 +27,6 @@ function csvCell(value: unknown): string {
 }
 
 export function exportDataset(ledgerPath: string, outDir: string, testBuyers: string[]): { rows: number; files: string[] } {
-  const tests = new Set(testBuyers.map(address => address.toLowerCase()));
   const rows: DatasetRow[] = new Ledger(ledgerPath)
     .all()
     .filter(entry => entry.state === "settled" || entry.state === "recovered")
@@ -40,7 +40,7 @@ export function exportDataset(ledgerPath: string, outDir: string, testBuyers: st
       network: entry.network,
       tx: entry.tx,
       payer: entry.payer,
-      buyer: entry.payer && tests.has(entry.payer.toLowerCase()) ? "cult-os-test" : "external",
+      buyer: isTestBuyer(entry.network, entry.payer, testBuyers) ? "cult-os-test" : "external",
       latency_ms: entry.latencyMs,
     }));
 
