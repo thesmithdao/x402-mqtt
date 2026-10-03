@@ -125,7 +125,7 @@ Already running a broker? Set `"broker"` to it with the bridge's username and pa
 - **Idempotent payments.** Retrying the same request and payment returns its saved result without another settlement. Reusing a payment for a different request or topic is refused.
 - **Private data stays private.** Raw readings and other buyers' replies are blocked at the broker, and the built-in broker only accepts requests that reply to the sender itself.
 - **Floods stay cheap.** Forged and unfunded payments are refused before they reach the facilitator. A wallet only earns a higher limit after it pays, and new buyers can't be locked out by a flood of fake IDs.
-- **Buyers have caps,** per call and in total, held even when buys run in parallel. A payment counts as spent until it expires unused on-chain, whatever the seller replies, and the same payment is resent instead of signing a new one. Caps cover one buyer instance, not restarts.
+- **Buyers have caps,** per call and in total, held even when buys run in parallel. Sent payments count as spent until confirmed unused after expiry, whatever the seller replies. A failed checkpoint sends no payment and releases its reservation. Caps cover one buyer instance, not restarts.
 - **TLS for remote brokers.** The buyer and the seller refuse plain `mqtt://` or `ws://` to anything but localhost unless you pass `--allow-cleartext`.
 - **USDC only.** Base and Solana buyers accept only canonical USDC, so their caps mean dollars. Solana supports ordinary keypair transfers; smart wallets, lookup tables and durable nonces are refused.
 

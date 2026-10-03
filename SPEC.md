@@ -151,6 +151,8 @@ The CLI stores unsigned recovery data in `$XDG_CACHE_HOME/x402-mqtt` or `~/.cach
 
 Library callers can catch `PurchasePendingError` and call `buyer.resume(error.request)`. To recover after a process restart, persist the request through `onPrepared` and resume with the same broker, wallet and network. `PurchaseExpiredError` means finalized chain evidence established unused expiry. Spending caps cover one buyer instance; resuming reserves the original amount once.
 
+`onPrepared` completes before transmission. If it throws or rejects, the purchase sends no payment and releases its spending reservation. A record saved before that failure can still be resumed; it must reserve capacity again. Resuming that payment on the same buyer while its checkpoint callback is running is refused. Submitted or uncertain payments retain their reservations.
+
 ## Upgrade notes
 
 Existing Base configuration remains valid. One seller process owns each ledger. Preserve the newest ledger and buyer recovery records during upgrades and rollbacks.

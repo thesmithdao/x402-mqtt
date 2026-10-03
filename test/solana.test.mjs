@@ -14,6 +14,7 @@ import { toClientSvmSigner } from "@x402/svm";
 import { createKeyPairSignerFromPrivateKeyBytes, getBase58Decoder, getBase64EncodedWireTransaction, getCompiledTransactionMessageDecoder, getCompiledTransactionMessageEncoder } from "@solana/kit";
 import { Ledger, Seller, SpendCapError, PurchasePendingError, PurchaseExpiredError, createBuyer, startBuiltInBroker, connectBridge, startBridge, exportDataset } from "../dist/index.js";
 import { PurchaseStore, brokerIdentity, publicBrokerUrl } from "../dist/recovery.js";
+import { checkpointTests } from "./checkpoint.mjs";
 import { SOLANA_NETWORK, SOLANA_USDC, SolanaChain, SolanaRpcUnavailableError, decodeSolana, inspectSolana, tokenAccount } from "../dist/solana.js";
 import { explorerUrl, walletIdentity } from "../dist/networks.js";
 import { loadConfig } from "../dist/config.js";
@@ -711,6 +712,19 @@ test("Solana resume declares unused expiry only with complete finalized evidence
   f.state.historyDown = false;
   await assert.rejects(buyer.resume(saved), PurchaseExpiredError);
   assert.equal(f.state.settle, 1);
+});
+
+checkpointTests("Solana", async (t, options) => {
+  const f = await fixture(t);
+  const buyers = [];
+  t.after(async () => { for (const buyer of buyers) await buyer.close(); });
+  const buyer = await localBuyer(t, f, options);
+  const create = async overrides => {
+    const another = await createBuyer({ url: f.buyerUrl, privateKey: f.key, network: SOLANA_NETWORK, rpcUrl: f.rpc, maxPerCall: "0.001", ...overrides });
+    buyers.push(another);
+    return another;
+  };
+  return { buyer, create, topic: "sensor", payments: () => f.state.verify };
 });
 
 test("a purchase checkpoint failure stops before any payment reaches the seller", async t => {

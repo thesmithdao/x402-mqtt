@@ -15,6 +15,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { Ledger, Seller, SpendCapError, PurchasePendingError, PurchaseExpiredError, SOLANA_NETWORK, connectBridge, createBuyer, exportDataset, startBuiltInBroker } from "../dist/index.js";
 import { startPage } from "../dist/page.js";
 import { PurchaseStore } from "../dist/recovery.js";
+import { checkpointTests } from "./checkpoint.mjs";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -326,6 +327,24 @@ test("a real transfer to the payout for the exact amount still counts", async ()
   });
   assert.equal(handled.reply.status, 200);
   assert.equal(handled.reply["x402/payment-response"].transaction, TX);
+});
+
+checkpointTests("Base", async (t, options) => {
+  const broker = await startBuiltInBroker({ port: 0 });
+  let payments = 0;
+  const seller = await fakeSeller(broker, request => {
+    payments++;
+    return { id: request.id, status: 200, result: { value: 42, ts: Date.now() }, "x402/payment-response": { success: true, transaction: TX, network: "eip155:8453", payer: request["x402/payment"].payload.authorization.from } };
+  });
+  const privateKey = key();
+  const buyers = [];
+  const create = async overrides => {
+    const buyer = await createBuyer({ url: broker.url, privateKey, maxPerCall: "0.001", ...overrides });
+    buyers.push(buyer);
+    return buyer;
+  };
+  t.after(async () => { for (const buyer of buyers) await buyer.close(); await seller.endAsync(); await broker.close(); });
+  return { buyer: await create(options), create, topic: "t", payments: () => payments };
 });
 
 test("Base resume signs the same authorization and preserves its original spending cap", async t => {

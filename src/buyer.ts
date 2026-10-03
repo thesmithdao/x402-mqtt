@@ -82,6 +82,7 @@ export async function createBuyer(options: BuyerOptions) {
   const accounted = new Set<string>();
   const reservations = new Map<string, Promise<void>>();
   const resuming = new Set<string>();
+  const checkpointing = new Set<string>();
   let spent = 0n;
   let preparations = 0;
   let preparationTimedOut = false;
@@ -174,6 +175,7 @@ export async function createBuyer(options: BuyerOptions) {
   }
 
   async function reservePurchase(identity: string, amount: bigint): Promise<void> {
+    if (checkpointing.has(identity)) throw new Error("purchase checkpoint in progress");
     const pending = reservations.get(identity);
     if (pending) return pending;
     if (accounted.has(identity)) return;
@@ -282,15 +284,33 @@ export async function createBuyer(options: BuyerOptions) {
     const { id, paymentRequired } = await quote(topic);
     const { payment } = await sign(paymentRequired);
     const accepted = payment.accepted;
+    let identity: string;
     const request: PurchaseRequest = { version: 1, id, topic, broker: brokerIdentity(options.url), payer: account.address, accepted: { scheme: accepted.scheme, network: accepted.network, amount: accepted.amount, asset: accepted.asset, payTo: accepted.payTo, maxTimeoutSeconds: accepted.maxTimeoutSeconds, extra: isSolana ? { feePayer: accepted.extra?.feePayer } : { name: accepted.extra?.name, version: accepted.extra?.version } } };
     if (isSolana) {
       const transaction = decodeSolana((payment.payload as { transaction: string }).transaction);
       const proof = await inspectSolana(payment, accepted);
+      identity = proof.messageHash;
       const held = (holds.get(proof.messageHash) as SvmHold).solana;
       request.solana = { message: Buffer.from(transaction.messageBytes).toString("base64"), slot: held.slot, lastValidBlockHeight: held.lastValidBlockHeight };
-    } else request.authorization = { ...(payment.payload as { authorization: NonNullable<PurchaseRequest["authorization"]> }).authorization };
+    } else {
+      request.authorization = { ...(payment.payload as { authorization: NonNullable<PurchaseRequest["authorization"]> }).authorization };
+      identity = request.authorization.nonce;
+    }
     validateRequest(request);
-    await options.onPrepared?.(structuredClone(request));
+    if (options.onPrepared) {
+      const hold = holds.get(identity);
+      checkpointing.add(identity);
+      try {
+        await options.onPrepared(structuredClone(request));
+      } catch (error) {
+        if (hold && holds.get(identity) === hold) {
+          holds.delete(identity);
+          accounted.delete(identity);
+          spent -= hold.amount;
+        }
+        throw error;
+      } finally { checkpointing.delete(identity); }
+    }
     return deliver(request, payment, started);
   }
 
