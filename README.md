@@ -65,6 +65,7 @@ If a purchase is pending, rerun the same command. It resumes the original paymen
 | Mac | Battery, power, CPU, memory and thermal readings | Built in with `--mac` |
 | Linux | Uptime, CPU load and memory usage | [Linux collector](docs/devices.md#linux-server) |
 | Android | Battery temperature and three-hour pressure change | [Termux collector](docs/devices.md#android-phone) |
+| Android TV box | Uptime, available memory/storage and exposed internal temperatures | [IoT TV Box guide](docs/devices.md#iot-tv-box) |
 
 Linux and Android collectors publish to your MQTT broker. List their topics and prices in the seller configuration. Either device can sell through Base, Solana or both.
 
@@ -133,7 +134,7 @@ Node 20 or newer. MIT license.
 
 ## Try it live
 
-Three machines sell readings at [cultos.dev/machines](https://www.cultos.dev/machines).
+Four machines sell readings at [cultos.dev/machines](https://www.cultos.dev/machines).
 
 The public fleet currently accepts Base. With `X402_MQTT_BUYER_KEY` loaded and a little Base USDC:
 
