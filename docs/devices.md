@@ -49,35 +49,18 @@ Keep the phone charging, and set Termux and Termux:API to **Unrestricted** batte
 
 ## IoT TV Box
 
-An Android TV box can publish through Termux while the seller runs on your existing server. The box needs no payment key or public administration port.
-
-On our Android 11 box, five topics are working. Temperature availability depends on the hardware and firmware:
-
-| Topic suffix | Reading | Unit |
-| --- | --- | --- |
-| `uptime` | Time since boot | days |
-| `memory/available` | Available memory | bytes |
-| `storage/available` | Available storage | bytes |
-| `soc/temperature` | SoC thermal-zone temperature | °C |
-| `ddr/temperature` | DDR thermal-zone temperature | °C |
-
-Check which thermal zones your box exposes from Termux:
+[examples/android/tvbox.mjs](../examples/android/tvbox.mjs) publishes uptime, available memory/storage and readable SoC/DDR temperatures. It runs in Termux with Node 20 or later; Termux:API is not required.
 
 ```sh
-for zone in /sys/class/thermal/thermal_zone*; do
-  cat "$zone/type" "$zone/temp"
-done
+pkg install nodejs-lts
+npm install mqtt@5.16.0
+termux-wake-lock
+BROKER_URL=mqtts://your-broker DEVICE=tvbox MQTT_USERNAME=tvbox MQTT_PASSWORD=… node tvbox.mjs
 ```
 
-Match zones by `type`, not their numeric order. Our box exposes `soc_thermal` and `ddr_thermal`. Linux reports `temp` in millidegrees Celsius: `47800` becomes `47.8 °C`. These are internal temperatures, not room temperature. Skip unreadable or invalid samples.
+Readings are sampled on connection and every 10 seconds. Missing or invalid channels are skipped; old observations are not queued during disconnection. Thermal zones are matched by driver type (`soc_thermal`, `ddr_thermal`); availability varies by device. Temperatures are internal, not ambient.
 
-For example, a current SoC reading published to `raw/tvbox/soc/temperature` uses the normal reading contract, with `ts` set to the actual sample time in Unix milliseconds:
-
-```json
-{ "value": 47.8, "unit": "°C", "ts": 1792377615910 }
-```
-
-List the matching offers on the seller:
+Add the available topics to your seller configuration:
 
 ```json
 {
@@ -92,4 +75,4 @@ List the matching offers on the seller:
 }
 ```
 
-Publish every 10 seconds over TLS with a device credential limited to its own topics. Use Termux:Boot, a wake lock and service supervision for unattended collection. Test reconnect and reboot recovery on your box. No firmware replacement is required.
+Use TLS and a device credential restricted to its own topics. For unattended collection, use Termux:Boot and service supervision; verify reconnect and reboot recovery on your device. No payment key or firmware replacement is needed.
