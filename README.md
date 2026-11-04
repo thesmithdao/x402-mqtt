@@ -66,6 +66,7 @@ If a purchase is pending, rerun the same command. It resumes the original paymen
 | Linux | Uptime, CPU load and memory usage | [Linux collector](docs/devices.md#linux-server) |
 | Android | Battery temperature and three-hour pressure change | [Termux collector](docs/devices.md#android-phone) |
 | Android TV box | Uptime, available memory/storage and exposed internal temperatures | [IoT TV Box guide](docs/devices.md#iot-tv-box) |
+| ESP8266 | Temperature and humidity through a hosted broker | [ESP8266 bridge](examples/esp8266/README.md) |
 
 Linux and Android collectors publish to your MQTT broker. List their topics and prices in the seller configuration. Either device can sell through Base, Solana or both.
 
