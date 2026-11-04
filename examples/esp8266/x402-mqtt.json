@@ -1,0 +1,14 @@
+{
+  "broker": "mqtt://127.0.0.1:1883",
+  "brokerUsername": "YOUR_SELLER_USERNAME",
+  "brokerPassword": "YOUR_SELLER_PASSWORD",
+  "payout": "0xYourPayoutAddress",
+  "facilitator": "coinbase",
+  "maxAgeSeconds": 30,
+  "ledger": "sensor-ledger.jsonl",
+  "pagePort": false,
+  "offers": [
+    { "topic": "temperatura", "price": "0.001", "unit": "°C" },
+    { "topic": "umidade", "price": "0.001", "unit": "%" }
+  ]
+}

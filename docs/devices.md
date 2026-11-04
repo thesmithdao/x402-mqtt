@@ -76,3 +76,7 @@ Add the available topics to your seller configuration:
 ```
 
 Use TLS and a device credential restricted to its own topics. For unattended collection, use Termux:Boot and service supervision; verify reconnect and reboot recovery on your device. No payment key or firmware replacement is needed.
+
+## ESP8266
+
+Publish temperature and humidity through a local Mosquitto TLS bridge to a hosted seller. See the [ESP8266 example](../examples/esp8266/README.md) for payloads, bridge and seller configuration.
